@@ -1,9 +1,22 @@
-import {get} from "idb-keyval";
 import {ChatMessage} from "@/models/chat/ChatMessage";
+import {
+    aesGcmDecrypt,
+    aesGcmEncrypt,
+    fromBase64,
+    importPublicKeySpki,
+    loadPrivateKey,
+    PrivateKey,
+    randomBytes,
+    rsaOaepDecrypt,
+    rsaOaepEncrypt,
+    toBase64,
+    utf8Decode,
+    utf8Encode
+} from "@/lib/crypto";
 
 export class E2EEncryptionService {
     private static instance: E2EEncryptionService
-    private privateKey: CryptoKey | null = null
+    private privateKey: PrivateKey | null = null
 
     private constructor() {}
 
@@ -16,8 +29,7 @@ export class E2EEncryptionService {
 
     async initialize(): Promise<void> {
         try {
-            const privateKey = await get('rsa-private-key')
-            this.privateKey = privateKey || null
+            this.privateKey = await loadPrivateKey()
             if (!this.privateKey) {
                 console.warn('Private key not found')
             }
@@ -30,27 +42,17 @@ export class E2EEncryptionService {
         encryptedContent: Record<string, string>
         encryptedKeys: Record<string, string>
     }> {
-        const aesKey = await window.crypto.subtle.generateKey(
-            { name: "AES-GCM", length: 256 },
-            true,
-            ["encrypt", "decrypt"]
-        )
-        const encoder = new TextEncoder()
-        const data = encoder.encode(plainText)
-        const iv = window.crypto.getRandomValues(new Uint8Array(12))
-        const encryptedData = await window.crypto.subtle.encrypt(
-            { name: "AES-GCM", iv: iv },
-            aesKey,
-            data
-        )
+        const aesKey = randomBytes(32)
+        const iv = randomBytes(12)
+        const encryptedData = aesGcmEncrypt(aesKey, iv, utf8Encode(plainText))
         const encryptedMessageData = {
-            encryptedData: this.arrayBufferToBase64(encryptedData),
-            iv: this.arrayBufferToBase64(iv.buffer)
+            encryptedData: toBase64(encryptedData),
+            iv: toBase64(iv)
         }
         const encryptedContent: Record<string, string> = {}
         const encryptedKeys: Record<string, string> = {}
         for (const [userId, publicKeyBase64] of Object.entries(publicKeys)) {
-            encryptedKeys[userId] = await this.encryptAESKeyWithRSA(aesKey, publicKeyBase64)
+            encryptedKeys[userId] = this.encryptAESKeyWithRSA(aesKey, publicKeyBase64)
 
             encryptedContent[userId] = JSON.stringify(encryptedMessageData)
         }
@@ -67,7 +69,7 @@ export class E2EEncryptionService {
             throw new Error('No encrypted key for current user')
         }
 
-        const aesKey = await this.decryptAESKeyWithRSA(encryptedAESKey)
+        const aesKey = this.decryptAESKeyWithRSA(encryptedAESKey)
 
         const encryptedContent = encryptedMessage.encryptedContent[currentUserId]
         if (!encryptedContent) {
@@ -76,81 +78,18 @@ export class E2EEncryptionService {
 
         const { encryptedData, iv } = JSON.parse(encryptedContent)
 
-        const encryptedBuffer = this.base64ToArrayBuffer(encryptedData)
-        const ivBuffer = this.base64ToArrayBuffer(iv)
-
-        const decryptedData = await window.crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: ivBuffer },
-            aesKey,
-            encryptedBuffer
-        )
-
-        const decoder = new TextDecoder()
-        return decoder.decode(decryptedData)
+        return utf8Decode(aesGcmDecrypt(aesKey, fromBase64(iv), fromBase64(encryptedData)))
     }
 
-    private async encryptAESKeyWithRSA(aesKey: CryptoKey, publicKeyBase64: string): Promise<string> {
-        const publicKey = await this.importPublicKey(publicKeyBase64)
-        const exportedKey = await window.crypto.subtle.exportKey('raw', aesKey)
-
-        const encryptedKey = await window.crypto.subtle.encrypt(
-            { name: "RSA-OAEP" },
-            publicKey,
-            exportedKey
-        )
-
-        return this.arrayBufferToBase64(encryptedKey)
+    private encryptAESKeyWithRSA(aesKey: string, publicKeyBase64: string): string {
+        const publicKey = importPublicKeySpki(publicKeyBase64)
+        return toBase64(rsaOaepEncrypt(publicKey, aesKey))
     }
 
-    private async decryptAESKeyWithRSA(encryptedKeyBase64: string): Promise<CryptoKey> {
+    private decryptAESKeyWithRSA(encryptedKeyBase64: string): string {
         if (!this.privateKey) {
             throw new Error('Private key not available')
         }
-
-        const encryptedKey = this.base64ToArrayBuffer(encryptedKeyBase64)
-
-        const decryptedKey = await window.crypto.subtle.decrypt(
-            { name: "RSA-OAEP" },
-            this.privateKey,
-            encryptedKey
-        )
-
-        return await window.crypto.subtle.importKey(
-            'raw',
-            decryptedKey,
-            { name: 'AES-GCM' },
-            false,
-            ['encrypt', 'decrypt']
-        )
-    }
-
-    private async importPublicKey(publicKeyBase64: string): Promise<CryptoKey> {
-        const keyData = this.base64ToArrayBuffer(publicKeyBase64)
-
-        return await window.crypto.subtle.importKey(
-            'spki',
-            keyData,
-            { name: 'RSA-OAEP', hash: 'SHA-256' },
-            false,
-            ['encrypt']
-        )
-    }
-
-    private arrayBufferToBase64(buffer: ArrayBuffer): string {
-        const bytes = new Uint8Array(buffer)
-        let binary = ''
-        for (let i = 0; i < bytes.byteLength; i++) {
-            binary += String.fromCharCode(bytes[i])
-        }
-        return btoa(binary)
-    }
-
-    private base64ToArrayBuffer(base64: string): ArrayBuffer {
-        const binaryString = atob(base64)
-        const bytes = new Uint8Array(binaryString.length)
-        for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i)
-        }
-        return bytes.buffer
+        return rsaOaepDecrypt(this.privateKey, fromBase64(encryptedKeyBase64))
     }
 }

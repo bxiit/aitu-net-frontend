@@ -12,19 +12,23 @@ export default function AuthForm() {
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [error, setError] = useState("");
+    const [submitting, setSubmitting] = useState(false);
     const router = useRouter();
     const {register} = useAuth();
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError("");
+        setSubmitting(true);
 
+        // Generating the 4096-bit key pair in JS takes several seconds
         register({username: username, email: email, password: password})
             .then(() => router.push("/auth/login"))
             .catch(error => {
                 const pd: ProblemDetail = error
-                setError(pd.detail)
+                setError(pd?.detail || "Registration failed")
             })
+            .finally(() => setSubmitting(false))
     };
 
     return (
@@ -120,12 +124,13 @@ export default function AuthForm() {
                         <div>
                             <button
                                 type="submit"
-                                className="group relative w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                disabled={submitting}
+                                className="group relative w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-60 disabled:cursor-wait"
                             >
 								<span className="absolute left-0 inset-y-0 flex items-center pl-3">
 									<UserPlus size={16} className="text-indigo-300"/>
 								</span>
-                                Create account
+                                {submitting ? "Creating account…" : "Create account"}
                             </button>
                         </div>
                     </form>

@@ -4,7 +4,22 @@ import {User} from "@/models/User";
 import {createContext, ReactNode, useContext, useEffect, useState} from "react";
 import {api} from "@/lib";
 import {NewUserRequest} from "@/models/NewUserRequest";
-import {del, get, set} from 'idb-keyval'
+import {
+    aesGcmDecrypt,
+    aesGcmEncrypt,
+    deletePrivateKey,
+    exportPrivateKeyPkcs8,
+    exportPublicKeySpki,
+    fromBase64,
+    generateRsaKeyPair,
+    importPrivateKeyPkcs8,
+    loadPrivateKey,
+    pbkdf2Sha256,
+    PrivateKey,
+    randomBytes,
+    savePrivateKey,
+    toBase64
+} from "@/lib/crypto";
 
 interface AuthContextType {
     user: User | null;
@@ -28,104 +43,47 @@ export function AuthProvider({children}: AuthProviderProps) {
         loadUser()
     }, []);
 
-    const deriveKeyFromPassword = async (password: string, salt: Uint8Array): Promise<CryptoKey> => {
-        const encoder = new TextEncoder();
-        const passwordBuffer = encoder.encode(password);
-
-        const baseKey = await window.crypto.subtle.importKey(
-            "raw",
-            passwordBuffer,
-            "PBKDF2",
-            false,
-            ["deriveKey"]
-        );
-
-        return window.crypto.subtle.deriveKey(
-            {
-                name: "PBKDF2",
-                salt: salt,
-                iterations: 100000,
-                hash: "SHA-256"
-            },
-            baseKey,
-            {
-                name: "AES-GCM",
-                length: 256
-            },
-            false,
-            ["encrypt", "decrypt"]
-        );
-    };
+    // AES-256 key derived from the password: PBKDF2-SHA256, 100k iterations
+    const deriveKeyFromPassword = (password: string, salt: string): Promise<string> =>
+        pbkdf2Sha256(password, salt, 100000, 32);
 
     // Шифрование приватного ключа паролем
-    const encryptPrivateKey = async (privateKey: CryptoKey, password: string): Promise<{
+    const encryptPrivateKey = async (privateKey: PrivateKey, password: string): Promise<{
         encryptedKey: string;
         salt: string;
         iv: string;
     }> => {
         // Генерируем соль и IV
-        const salt = window.crypto.getRandomValues(new Uint8Array(16));
-        const iv = window.crypto.getRandomValues(new Uint8Array(12));
-
-        // Экспортируем приватный ключ
-        const privateKeyBuffer = await window.crypto.subtle.exportKey("pkcs8", privateKey);
+        const salt = randomBytes(16);
+        const iv = randomBytes(12);
 
         // Создаем ключ шифрования из пароля
         const encryptionKey = await deriveKeyFromPassword(password, salt);
 
-        // Шифруем приватный ключ
-        const encryptedBuffer = await window.crypto.subtle.encrypt(
-            {
-                name: "AES-GCM",
-                iv: iv
-            },
-            encryptionKey,
-            privateKeyBuffer
-        );
+        // Шифруем приватный ключ (PKCS#8)
+        const encryptedKey = aesGcmEncrypt(encryptionKey, iv, exportPrivateKeyPkcs8(privateKey));
 
         return {
-            encryptedKey: btoa(String.fromCharCode(...new Uint8Array(encryptedBuffer))),
-            salt: btoa(String.fromCharCode(...salt)),
-            iv: btoa(String.fromCharCode(...iv))
+            encryptedKey: toBase64(encryptedKey),
+            salt: toBase64(salt),
+            iv: toBase64(iv)
         };
     };
 
     const decryptPrivateKey = async (
         encryptedData: { encryptedKey: string; salt: string; iv: string },
         password: string
-    ): Promise<CryptoKey> => {
-        const encryptedBuffer = new Uint8Array(
-            atob(encryptedData.encryptedKey).split('').map(c => c.charCodeAt(0))
-        );
-        const salt = new Uint8Array(
-            atob(encryptedData.salt).split('').map(c => c.charCodeAt(0))
-        );
-        const iv = new Uint8Array(
-            atob(encryptedData.iv).split('').map(c => c.charCodeAt(0))
-        );
+    ): Promise<PrivateKey> => {
+        const decryptionKey = await deriveKeyFromPassword(password, fromBase64(encryptedData.salt));
 
-        const decryptionKey = await deriveKeyFromPassword(password, salt);
-
-        const decryptedBuffer = await window.crypto.subtle.decrypt(
-            {
-                name: "AES-GCM",
-                iv: iv
-            },
+        const privateKeyDer = aesGcmDecrypt(
             decryptionKey,
-            encryptedBuffer
+            fromBase64(encryptedData.iv),
+            fromBase64(encryptedData.encryptedKey)
         );
 
         // Импортируем дешифрованный приватный ключ
-        return window.crypto.subtle.importKey(
-            "pkcs8",
-            decryptedBuffer,
-            {
-                name: "RSA-OAEP",
-                hash: "SHA-256"
-            },
-            true,
-            ["decrypt"]
-        );
+        return importPrivateKeyPkcs8(privateKeyDer);
     };
 
     const loginUser = async (userData: { email: string; password: string }) => {
@@ -160,7 +118,7 @@ export function AuthProvider({children}: AuthProviderProps) {
             .finally(() => {
                 setUser(null)
                 // Удаляем приватный ключ из локального хранилища
-                del('rsa-private-key')
+                deletePrivateKey()
                 console.log("Logout successful")
             })
     }
@@ -175,38 +133,26 @@ export function AuthProvider({children}: AuthProviderProps) {
         return api.auth.register(userRegData)
             .then(response => {
                 console.log("Registration successful:", response.data);
-                set('rsa-private-key', keyPair.privateKey);
+                return savePrivateKey(keyPair.privateKey);
             })
             .catch(error => {
                 return Promise.reject(error.response.data);
             })
     };
 
-    const generateKeyPair = async (): Promise<{ privateKey: CryptoKey; publicKey: string }> => {
-        const keyPair = await window.crypto.subtle.generateKey(
-            {
-                name: "RSA-OAEP",
-                modulusLength: 4096,
-                publicExponent: new Uint8Array([1, 0, 1]),
-                hash: "SHA-256"
-            },
-            true,
-            ["encrypt", "decrypt"]
-        );
-
-        const exportedPublicKey = await window.crypto.subtle.exportKey("spki", keyPair.publicKey);
-        const publicKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(exportedPublicKey)));
+    const generateKeyPair = async (): Promise<{ privateKey: PrivateKey; publicKey: string }> => {
+        const keyPair = await generateRsaKeyPair(4096);
 
         return {
             privateKey: keyPair.privateKey,
-            publicKey: publicKeyBase64
+            publicKey: exportPublicKeySpki(keyPair.publicKey)
         };
     }
 
     const recoverPrivateKey = async (password: string): Promise<boolean> => {
         try {
             // Проверяем, есть ли уже ключ в локальном хранилище
-            const existingKey = await get('rsa-private-key');
+            const existingKey = await loadPrivateKey();
             if (existingKey) {
                 console.log("Private key already exists locally");
                 return true;
@@ -221,7 +167,7 @@ export function AuthProvider({children}: AuthProviderProps) {
 
             const privateKey = await decryptPrivateKey(encryptedKeyData, password);
 
-            await set('rsa-private-key', privateKey);
+            await savePrivateKey(privateKey);
 
             console.log("Private key recovered and stored locally");
             return true;
@@ -257,46 +203,3 @@ export function useAuth() {
     return context;
 }
 
-// Дополнительные утилиты для работы с ключами
-export const cryptoUtils = {
-    // Функция для шифрования данных с помощью приватного ключа пользователя
-    encryptData: async (data: string): Promise<string> => {
-        const privateKey = await get('rsa-private-key');
-        if (!privateKey) {
-            throw new Error("Private key not found. Please log in first.");
-        }
-
-        const encoder = new TextEncoder();
-        const dataBuffer = encoder.encode(data);
-
-        // Для RSA-OAEP мы используем публичный ключ для шифрования
-        // Здесь предполагается, что у вас есть доступ к публичному ключу
-        // В реальном приложении вы бы получили его из профиля пользователя
-
-        // Это пример - вам нужно адаптировать под вашу архитектуру
-        throw new Error("Implementation needed based on your key management strategy");
-    },
-
-    // Функция для дешифрования данных
-    decryptData: async (encryptedData: string): Promise<string> => {
-        const privateKey = await get('rsa-private-key') as CryptoKey;
-        if (!privateKey) {
-            throw new Error("Private key not found. Please log in first.");
-        }
-
-        const encryptedBuffer = new Uint8Array(
-            atob(encryptedData).split('').map(c => c.charCodeAt(0))
-        );
-
-        const decryptedBuffer = await window.crypto.subtle.decrypt(
-            {
-                name: "RSA-OAEP"
-            },
-            privateKey,
-            encryptedBuffer
-        );
-
-        const decoder = new TextDecoder();
-        return decoder.decode(decryptedBuffer);
-    }
-};
