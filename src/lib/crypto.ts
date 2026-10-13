@@ -17,11 +17,36 @@ export const randomBytes = (count: number): string => forge.random.getBytesSync(
 export const utf8Encode = (text: string): string => forge.util.encodeUtf8(text);
 export const utf8Decode = (bytes: string): string => forge.util.decodeUtf8(bytes);
 
-// Without web workers forge generates the key in small setTimeout chunks, so the page stays responsive.
+// Missing from @types/node-forge
+type KeyPairGenerationState = { keys: forge.pki.rsa.KeyPair | null };
+const rsaSteps = forge.pki.rsa as unknown as {
+    createKeyPairGenerationState(bits: number, e: number): KeyPairGenerationState;
+    stepKeyPairGenerationState(state: KeyPairGenerationState, ms: number): boolean;
+};
+
 export function generateRsaKeyPair(bits = 4096): Promise<forge.pki.rsa.KeyPair> {
-    return new Promise((resolve, reject) =>
-        forge.pki.rsa.generateKeyPair({bits, e: 0x10001}, (err, keyPair) => err ? reject(err) : resolve(keyPair))
-    );
+    return new Promise((resolve, reject) => {
+        // forge's async generateKeyPair uses native WebCrypto when it exists...
+        if (window.crypto?.subtle) {
+            forge.pki.rsa.generateKeyPair({bits, e: 0x10001}, (err, keyPair) => err ? reject(err) : resolve(keyPair));
+            return;
+        }
+        // ...but without it, it spawns web workers from a script URL the app doesn't serve and never settles.
+        // So generate on the main thread in 50ms slices to keep the page responsive.
+        const state = rsaSteps.createKeyPairGenerationState(bits, 0x10001);
+        const step = () => {
+            try {
+                if (rsaSteps.stepKeyPairGenerationState(state, 50)) {
+                    resolve(state.keys!);
+                } else {
+                    setTimeout(step, 0);
+                }
+            } catch (error) {
+                reject(error);
+            }
+        };
+        setTimeout(step, 0);
+    });
 }
 
 export const exportPublicKeySpki = (publicKey: PublicKey): string =>
