@@ -39,4 +39,4 @@ jobs:
 
             docker images "${{ secrets.DOCKER_USERNAME }}/aitu-net-frontend" --format "{{.ID}}" | grep -v "$NEW_IMAGE_ID" | xargs -r docker rmi -f || true
 
-            docker run -d --name aitu-net-frontend --network aitu-net -p 3000:3000 ${{ secrets.DOCKER_USERNAME }}/aitu-net-frontend:latest
+            docker run -d --name aitu-net-frontend --network aitu-net -p 127.0.0.1:3000:3000 ${{ secrets.DOCKER_USERNAME }}/aitu-net-frontend:latest
