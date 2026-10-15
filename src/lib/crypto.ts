@@ -91,6 +91,44 @@ export function aesGcmDecrypt(key: string, iv: string, data: string): string {
     return decipher.output.getBytes();
 }
 
+// Byte arrays <-> forge binary strings. Chunked, because String.fromCharCode(...bytes) overflows the
+// call stack for media-sized arrays.
+export function bytesToBinary(bytes: Uint8Array): string {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return binary;
+}
+
+export function binaryToBytes(binary: string): Uint8Array<ArrayBuffer> {
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+}
+
+// AES-GCM for files. Native WebCrypto where available (HTTPS/localhost) is much faster on large media;
+// forge is the fallback. Both produce ciphertext with the 16-byte tag appended, so either side can decrypt.
+export async function aesGcmEncryptBytes(key: Uint8Array<ArrayBuffer>, iv: Uint8Array<ArrayBuffer>,
+                                         data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+    if (window.crypto?.subtle) {
+        const cryptoKey = await window.crypto.subtle.importKey("raw", key, "AES-GCM", false, ["encrypt"]);
+        return new Uint8Array(await window.crypto.subtle.encrypt({name: "AES-GCM", iv}, cryptoKey, data));
+    }
+    return binaryToBytes(aesGcmEncrypt(bytesToBinary(key), bytesToBinary(iv), bytesToBinary(data)));
+}
+
+export async function aesGcmDecryptBytes(key: Uint8Array<ArrayBuffer>, iv: Uint8Array<ArrayBuffer>,
+                                         data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+    if (window.crypto?.subtle) {
+        const cryptoKey = await window.crypto.subtle.importKey("raw", key, "AES-GCM", false, ["decrypt"]);
+        return new Uint8Array(await window.crypto.subtle.decrypt({name: "AES-GCM", iv}, cryptoKey, data));
+    }
+    return binaryToBytes(aesGcmDecrypt(bytesToBinary(key), bytesToBinary(iv), bytesToBinary(data)));
+}
+
 // Async form so the 100k iterations don't freeze the page.
 export function pbkdf2Sha256(password: string, salt: string, iterations: number, keyBytes: number): Promise<string> {
     return new Promise((resolve, reject) =>

@@ -1,6 +1,5 @@
 import {User} from "@/models/User";
 import {request} from "@/lib/apiClient";
-import {ChatMessage} from "@/models/chat/ChatMessage";
 import {ChatRoom} from "@/models/chat/ChatRoom";
 import {AxiosResponse} from "axios";
 import {ChatRoomWithMessages} from "@/models/chat/ChatRoomWithMessages";
@@ -21,12 +20,15 @@ export const chatApi = {
     fetchRelatedUsers: (): Promise<AxiosResponse<User[]>> =>
         (request<User[]>(`/users/related`)),
 
-    uploadFileMessage: (formData: FormData): Promise<AxiosResponse<ChatMessage>> =>
-        (request<ChatMessage>('/chats/messages/files', {
-            method: 'POST',
-            data: formData,
-            headers: 'Content-Type: multipart/form-data'
-        })),
+    /** Uploads an already-encrypted media file; only the chat's participants can download it. */
+    uploadChatFile: (chatId: string, encryptedFile: Blob): Promise<AxiosResponse<{ fileId: string }>> => {
+        const formData = new FormData();
+        formData.set("file", encryptedFile, "blob");
+        return request<{ fileId: string }>(`/chats/rooms/${chatId}/files`, {method: 'POST', data: formData});
+    },
+
+    downloadChatFile: (chatId: string, fileId: string): Promise<AxiosResponse<ArrayBuffer>> =>
+        (request<ArrayBuffer>(`/chats/rooms/${chatId}/files/${fileId}`, {responseType: 'arraybuffer'})),
 
     fetchChats: (userId?: string): Promise<AxiosResponse<ChatRoomWithMessages[]>> =>
         (request<ChatRoomWithMessages[]>(`/chats/${userId ?? ''}`)),
