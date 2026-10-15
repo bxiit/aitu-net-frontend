@@ -31,4 +31,10 @@ export const authApi = {
             salt: string;
             iv: string;
         }>('/auth/encrypted-private-key', {method: 'GET'}),
+
+    /** For accounts created before end-to-end encryption: the server accepts this only while it has no keys. */
+    setUpKeys: (keys: {
+        publicKey: string;
+        encryptedPrivateKeyDto: { encryptedKey: string; salt: string; iv: string };
+    }) => request<void>('/auth/keys', {method: 'POST', data: keys}),
 };

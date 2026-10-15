@@ -2,21 +2,21 @@ import {ChatMessage} from "@/models/chat/ChatMessage";
 import {
     aesGcmDecrypt,
     aesGcmEncrypt,
+    DecryptionKey,
     fromBase64,
-    importPublicKeySpki,
     loadPrivateKey,
-    PrivateKey,
     randomBytes,
-    rsaOaepDecrypt,
-    rsaOaepEncrypt,
+    rsaOaepDecryptWith,
+    rsaOaepEncryptFor,
     toBase64,
+    toDecryptionKey,
     utf8Decode,
     utf8Encode
 } from "@/lib/crypto";
 
 export class E2EEncryptionService {
     private static instance: E2EEncryptionService
-    private privateKey: PrivateKey | null = null
+    private privateKey: DecryptionKey | null = null
 
     private constructor() {}
 
@@ -29,7 +29,8 @@ export class E2EEncryptionService {
 
     async initialize(): Promise<void> {
         try {
-            this.privateKey = await loadPrivateKey()
+            const privateKey = await loadPrivateKey()
+            this.privateKey = privateKey ? await toDecryptionKey(privateKey) : null
             if (!this.privateKey) {
                 console.warn('Private key not found')
             }
@@ -52,7 +53,7 @@ export class E2EEncryptionService {
         const encryptedContent: Record<string, string> = {}
         const encryptedKeys: Record<string, string> = {}
         for (const [userId, publicKeyBase64] of Object.entries(publicKeys)) {
-            encryptedKeys[userId] = this.encryptAESKeyWithRSA(aesKey, publicKeyBase64)
+            encryptedKeys[userId] = await this.encryptAESKeyWithRSA(aesKey, publicKeyBase64)
 
             encryptedContent[userId] = JSON.stringify(encryptedMessageData)
         }
@@ -69,7 +70,7 @@ export class E2EEncryptionService {
             throw new Error('No encrypted key for current user')
         }
 
-        const aesKey = this.decryptAESKeyWithRSA(encryptedAESKey)
+        const aesKey = await this.decryptAESKeyWithRSA(encryptedAESKey)
 
         const encryptedContent = encryptedMessage.encryptedContent[currentUserId]
         if (!encryptedContent) {
@@ -81,15 +82,14 @@ export class E2EEncryptionService {
         return utf8Decode(aesGcmDecrypt(aesKey, fromBase64(iv), fromBase64(encryptedData)))
     }
 
-    private encryptAESKeyWithRSA(aesKey: string, publicKeyBase64: string): string {
-        const publicKey = importPublicKeySpki(publicKeyBase64)
-        return toBase64(rsaOaepEncrypt(publicKey, aesKey))
+    private async encryptAESKeyWithRSA(aesKey: string, publicKeyBase64: string): Promise<string> {
+        return toBase64(await rsaOaepEncryptFor(publicKeyBase64, aesKey))
     }
 
-    private decryptAESKeyWithRSA(encryptedKeyBase64: string): string {
+    private async decryptAESKeyWithRSA(encryptedKeyBase64: string): Promise<string> {
         if (!this.privateKey) {
             throw new Error('Private key not available')
         }
-        return rsaOaepDecrypt(this.privateKey, fromBase64(encryptedKeyBase64))
+        return rsaOaepDecryptWith(this.privateKey, fromBase64(encryptedKeyBase64))
     }
 }

@@ -3,6 +3,7 @@
 import {User} from "@/models/User";
 import {createContext, ReactNode, useContext, useEffect, useState} from "react";
 import {api} from "@/lib";
+import {isAxiosError} from "axios";
 import {NewUserRequest} from "@/models/NewUserRequest";
 import {
     aesGcmDecrypt,
@@ -149,6 +150,15 @@ export function AuthProvider({children}: AuthProviderProps) {
         };
     }
 
+    const setUpKeys = async (password: string) => {
+        const keyPair = await generateKeyPair();
+        await api.auth.setUpKeys({
+            publicKey: keyPair.publicKey,
+            encryptedPrivateKeyDto: await encryptPrivateKey(keyPair.privateKey, password),
+        });
+        await savePrivateKey(keyPair.privateKey);
+    };
+
     const recoverPrivateKey = async (password: string): Promise<boolean> => {
         try {
             // Проверяем, есть ли уже ключ в локальном хранилище
@@ -158,9 +168,17 @@ export function AuthProvider({children}: AuthProviderProps) {
                 return true;
             }
 
-            const response = await api.auth.getEncryptedPrivateKey();
-            if (response.status !== 200) {
-                throw new Error("Failed to fetch encrypted private key from server");
+            let response;
+            try {
+                response = await api.auth.getEncryptedPrivateKey();
+            } catch (error) {
+                // 404: the account was created before end-to-end encryption and has no key pair yet
+                if (isAxiosError(error) && error.response?.status === 404) {
+                    await setUpKeys(password);
+                    console.log("Generated a key pair for an account that had none");
+                    return true;
+                }
+                throw error;
             }
 
             const encryptedKeyData = response.data;

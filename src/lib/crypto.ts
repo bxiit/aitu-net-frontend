@@ -69,6 +69,39 @@ export const rsaOaepEncrypt = (publicKey: PublicKey, bytes: string): string =>
 export const rsaOaepDecrypt = (privateKey: PrivateKey, bytes: string): string =>
     privateKey.decrypt(bytes, "RSA-OAEP", oaepSha256());
 
+// RSA-OAEP for the per-message AES key, with native WebCrypto where available (HTTPS/localhost):
+// the private-key operation takes ~4 ms natively versus ~120-190 ms in forge, paid for every message
+// received and for the whole history when a chat loads. forge is the fallback on plain-HTTP pages.
+const RSA_OAEP = {name: "RSA-OAEP", hash: "SHA-256"};
+
+export type DecryptionKey = { forge: PrivateKey; native: CryptoKey | null };
+
+export async function toDecryptionKey(privateKey: PrivateKey): Promise<DecryptionKey> {
+    const native = window.crypto?.subtle
+        ? await window.crypto.subtle.importKey("pkcs8", binaryToBytes(exportPrivateKeyPkcs8(privateKey)),
+            RSA_OAEP, false, ["decrypt"])
+        : null;
+    return {forge: privateKey, native};
+}
+
+export async function rsaOaepDecryptWith(key: DecryptionKey, bytes: string): Promise<string> {
+    if (key.native) {
+        return bytesToBinary(new Uint8Array(
+            await window.crypto.subtle.decrypt({name: "RSA-OAEP"}, key.native, binaryToBytes(bytes))));
+    }
+    return rsaOaepDecrypt(key.forge, bytes);
+}
+
+export async function rsaOaepEncryptFor(publicKeySpkiBase64: string, bytes: string): Promise<string> {
+    if (window.crypto?.subtle) {
+        const publicKey = await window.crypto.subtle.importKey("spki", binaryToBytes(fromBase64(publicKeySpkiBase64)),
+            RSA_OAEP, false, ["encrypt"]);
+        return bytesToBinary(new Uint8Array(
+            await window.crypto.subtle.encrypt({name: "RSA-OAEP"}, publicKey, binaryToBytes(bytes))));
+    }
+    return rsaOaepEncrypt(importPublicKeySpki(publicKeySpkiBase64), bytes);
+}
+
 export function aesGcmEncrypt(key: string, iv: string, plaintext: string): string {
     const cipher = forge.cipher.createCipher("AES-GCM", key);
     cipher.start({iv, tagLength: AES_GCM_TAG_BYTES * 8});
