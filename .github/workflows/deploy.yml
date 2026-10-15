@@ -1,0 +1,88 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/bxiit/aitu-net-frontend
+  DEPLOY_PATH: /srv/docker/aitu-frontend
+  HOST_PORT: "8006"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Подключаем GitHub Actions runner к Tailscale
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:github-actions
+
+      # Логинимся в GHCR для push Docker image
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Собираем image и отправляем его в GHCR.
+      # Кэш слоёв в GitHub Actions: npm ci пропускается, если package-lock.json не менялся.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Настраиваем SSH
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/github_actions
+          chmod 600 ~/.ssh/github_actions
+
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          SSH_TARGET="${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
+          SSH_OPTS="-i ${HOME}/.ssh/github_actions -o StrictHostKeyChecking=yes"
+
+          echo "Deploy path: ${DEPLOY_PATH}"
+          echo "Port: ${HOST_PORT}"
+
+          printf "IMAGE_TAG='%s'\nHOST_PORT='%s'\n" "${GITHUB_REF_NAME}" "${HOST_PORT}" > deploy.env
+
+          # Создаём директорию
+          ssh ${SSH_OPTS} "${SSH_TARGET}" "mkdir -p ${DEPLOY_PATH}"
+
+          # Передаём compose.yml и .env
+          scp ${SSH_OPTS} deploy/compose.yml "${SSH_TARGET}:${DEPLOY_PATH}/compose.yml"
+          scp ${SSH_OPTS} deploy.env "${SSH_TARGET}:${DEPLOY_PATH}/.env"
+
+          # Авторизация GHCR + запуск контейнера
+          echo "${{ secrets.GHCR_TOKEN }}" | ssh ${SSH_OPTS} "${SSH_TARGET}" \
+            "docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin && \
+             { docker network inspect aitu-net >/dev/null 2>&1 || docker network create aitu-net; } && \
+             cd ${DEPLOY_PATH} && \
+             docker compose pull && \
+             docker compose up -d --remove-orphans"

@@ -39,7 +39,7 @@ export default function LoginForm() {
         setResetMessage('');
         try {
             await api.auth.forgotPassword(resetEmail);
-            setResetMessage("Password reset link has been sent.");
+            setResetMessage("We've emailed you a reset code.");
             setResetEmail("");
         } catch (err: any) {
             const problem: ProblemDetail = err;
@@ -141,7 +141,14 @@ export default function LoginForm() {
                                     required
                                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm dark:bg-gray-700 dark:text-white"
                                 />
-                                {resetMessage && <p className="text-sm text-green-600">{resetMessage}</p>}
+                                {resetMessage && (
+                                    <p className="text-sm text-green-600">
+                                        {resetMessage}{" "}
+                                        <Link href="/auth/recover" className="font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400">
+                                            Enter the code
+                                        </Link>
+                                    </p>
+                                )}
                                 {resetError && <p className="text-sm text-red-600">{resetError}</p>}
                                 <div className="flex justify-end space-x-2">
                                     <button
@@ -160,7 +167,7 @@ export default function LoginForm() {
                                         type="submit"
                                         className="text-sm font-medium text-white bg-indigo-600 px-3 py-1.5 rounded hover:bg-indigo-700"
                                     >
-                                        Send reset link
+                                        Send reset code
                                     </button>
                                 </div>
                             </form>

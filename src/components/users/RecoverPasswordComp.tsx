@@ -6,8 +6,8 @@ import {api} from "@/lib";
 
 export default function RecoverPasswordComp() {
     const params = useSearchParams();
-    const token = params.get('token');
-
+    // the reset email contains a code to paste here; ?token= still works for old links
+    const [token, setToken] = useState(params.get('token') ?? '');
     const [password, setPassword] = useState('');
     const [password2, setPassword2] = useState('');
     const [message, setMessage] = useState('');
@@ -18,8 +18,8 @@ export default function RecoverPasswordComp() {
         setError('');
         setMessage('');
 
-        if (!token) {
-            setError("Invalid recovery link.");
+        if (!token.trim()) {
+            setError("Enter the code from the email.");
             return;
         }
 
@@ -30,7 +30,7 @@ export default function RecoverPasswordComp() {
 
         try {
             setLoading(true);
-            await api.auth.recoverPassword(token, password);
+            await api.auth.recoverPassword(token.trim(), password);
             setMessage("Your password has been successfully updated.");
             setPassword('');
             setPassword2('');
@@ -50,7 +50,7 @@ export default function RecoverPasswordComp() {
                         Reset Your Password
                     </h2>
                     <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-                        Enter your new password below.
+                        Enter the code from the email and your new password.
                     </p>
                 </div>
 
@@ -70,6 +70,22 @@ export default function RecoverPasswordComp() {
                     )}
 
                     <div className="space-y-6">
+                        <div>
+                            <label htmlFor="token"
+                                   className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                                Reset Code
+                            </label>
+                            <input
+                                id="token"
+                                type="text"
+                                autoComplete="one-time-code"
+                                value={token}
+                                onChange={(e) => setToken(e.target.value)}
+                                required
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 text-gray-900 dark:text-white dark:bg-gray-700 sm:text-sm font-mono"
+                            />
+                        </div>
+
                         <div>
                             <label htmlFor="password"
                                    className="block text-sm font-medium text-gray-700 dark:text-gray-300">

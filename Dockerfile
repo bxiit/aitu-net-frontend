@@ -7,6 +7,10 @@ FROM node:22.9.0-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# next.config.mjs proxies /api and /ws here; rewrites are fixed at build time.
+# aitu-backend is the backend's alias on the shared aitu-net Docker network (see deploy/compose.yml).
+ARG API_PROXY_TARGET=http://aitu-backend:8080
+ENV API_PROXY_TARGET=$API_PROXY_TARGET
 # `next build` directly: the npm "build" script ends in `|| true`, which would hide a failed build
 RUN npx next build
 
