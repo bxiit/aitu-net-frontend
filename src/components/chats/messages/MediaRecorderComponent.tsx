@@ -1,12 +1,10 @@
-import React, { ReactElement, useRef, useState } from "react";
-import { Mic, MicOff, Video, VideoOff, Lock, Upload, AlertCircle } from "lucide-react";
-import { MessageType } from "@/models/chat/ChatMessage";
-import { api } from "@/lib";
-import { useAuth } from "@/context/AuthProvider";
-import { VideoMessagePreviewModal } from "@/components/chats/messages/VideoMessagePreviewModal";
-import { useTime } from "@/hooks/useTime";
+import React, {ReactElement, useEffect, useRef, useState} from "react";
+import {AlertCircle, Lock, Mic, Send, Upload, Video, X} from "lucide-react";
+import {MessageType} from "@/models/chat/ChatMessage";
+import {VideoMessagePreviewModal} from "@/components/chats/messages/VideoMessagePreviewModal";
+import {formatDuration} from "@/components/chats/messages/EncryptedMediaPlayer";
+import {encryptAndUploadMedia} from "@/service/ChatMediaService";
 
-// Обновленный интерфейс MediaRecorderComponent
 interface E2EMediaRecorderProps {
     chatId: string;
     type: FileMessageType;
@@ -15,82 +13,62 @@ interface E2EMediaRecorderProps {
     disabled?: boolean;
 }
 
-type MediaTypeConfig = {
-    mediaRecorderOptions: MediaRecorderOptions;
-    mediaStreamConstraints: MediaStreamConstraints;
-    enabledUI: ReactElement;
-    disabledUI: ReactElement;
-    blobProperty: BlobPropertyBag;
-    messageType: MessageType;
-    displayName: string;
-}
-
 export enum FileMessageType {
     VIDEO = 'VIDEO',
     AUDIO = 'AUDIO'
 }
 
+type MediaTypeConfig = {
+    // in order of preference; the first one the browser can record is used (Safari can't record WebM)
+    mimeTypes: string[];
+    recorderOptions: MediaRecorderOptions;
+    constraints: MediaStreamConstraints;
+    maxSeconds: number;
+    messageType: MessageType;
+    displayName: string;
+    idleUI: ReactElement;
+}
+
 const mediaRecorderConfigRecord: Record<FileMessageType, MediaTypeConfig> = {
     [FileMessageType.AUDIO]: {
-        mediaRecorderOptions: {
-            mimeType: 'audio/webm',
-            audioBitsPerSecond: 128000
+        mimeTypes: ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'],
+        // mono speech: ~240 KB per minute
+        recorderOptions: {audioBitsPerSecond: 32_000},
+        constraints: {
+            audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
         },
-        mediaStreamConstraints: {
-            audio: {
-                channelCount: { ideal: 2 },
-                sampleRate: { ideal: 48000 },
-                sampleSize: { ideal: 24 },
-                autoGainControl: false,
-                echoCancellation: false,
-                noiseSuppression: false
-            }
-        },
-        enabledUI: (
+        maxSeconds: 300,
+        messageType: MessageType.MESSAGE_AUDIO,
+        displayName: 'Voice message',
+        idleUI: (
             <span className="flex items-center gap-2">
-                <MicOff size={16} strokeWidth={2.5} />
-                <span className="text-xs">Stop</span>
-            </span>
-        ),
-        disabledUI: (
-            <span className="flex items-center gap-2">
-                <Mic size={16} strokeWidth={2.5} />
+                <Mic size={16} strokeWidth={2.5}/>
                 <span className="text-xs">Voice</span>
             </span>
         ),
-        blobProperty: {
-            type: 'audio/mp3;codec=opus'
-        },
-        messageType: MessageType.MESSAGE_AUDIO,
-        displayName: 'Voice Message'
     },
-
     [FileMessageType.VIDEO]: {
-        mediaRecorderOptions: {
-            videoBitsPerSecond: 8000000
+        mimeTypes: ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'],
+        // ~11 MB per minute, well under the server's 30 MB upload limit
+        recorderOptions: {videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 64_000},
+        constraints: {
+            video: {facingMode: 'user', width: {ideal: 640}, height: {ideal: 640}},
+            audio: {echoCancellation: true, noiseSuppression: true}
         },
-        mediaStreamConstraints: {
-            video: true,
-            audio: true
-        },
-        enabledUI: (
+        maxSeconds: 60,
+        messageType: MessageType.MESSAGE_VIDEO,
+        displayName: 'Video message',
+        idleUI: (
             <span className="flex items-center gap-2">
-                <VideoOff size={16} strokeWidth={2.5} />
-                <span className="text-xs">Stop</span>
-            </span>
-        ),
-        disabledUI: (
-            <span className="flex items-center gap-2">
-                <Video size={16} strokeWidth={2.5} />
+                <Video size={16} strokeWidth={2.5}/>
                 <span className="text-xs">Video</span>
             </span>
         ),
-        blobProperty: {
-            type: 'video/mp4'
-        },
-        messageType: MessageType.MESSAGE_VIDEO,
-        displayName: 'Video Message'
     }
+}
+
+function pickMimeType(candidates: string[]): string | undefined {
+    return candidates.find(type => MediaRecorder.isTypeSupported(type));
 }
 
 export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
@@ -100,237 +78,179 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
                                                                             isEncrypting = false,
                                                                             disabled = false
                                                                         }) => {
-    const { user } = useAuth();
-    const [recording, setRecording] = useState(false);
-    const [uploading, setUploading] = useState(false);
+    const config = mediaRecorderConfigRecord[type];
+    const [state, setState] = useState<'idle' | 'recording' | 'sending'>('idle');
     const [error, setError] = useState<string | null>(null);
-    const [recordingTime, setRecordingTime] = useState(0);
-    const mediaRecorderRef = useRef<MediaRecorder>(null);
-    const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-    const chunks: Blob[] = [];
-    const mediaRecorderConfig = mediaRecorderConfigRecord[type];
+    const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+    const recorderRef = useRef<MediaRecorder | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const chunksRef = useRef<Blob[]>([]);
+    const discardRef = useRef(false);
+    const startedAtRef = useRef(0);
+    const stoppedAtRef = useRef(0);
+    const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const videoPreviewRef = useRef<HTMLVideoElement>(null);
-    const { start, stop } = useTime();
 
-    const isDisabled = disabled || isEncrypting || uploading || recording;
+    function releaseDevices() {
+        if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+        }
+        // stopping the tracks turns the camera/microphone indicator off
+        streamRef.current?.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+    }
 
-    React.useEffect(() => {
-        return () => {
-            if (recordingIntervalRef.current) {
-                clearInterval(recordingIntervalRef.current);
-            }
-        };
+    // Leaving the chat mid-recording: discard it and release the devices
+    useEffect(() => () => {
+        discardRef.current = true;
+        if (recorderRef.current?.state === 'recording') {
+            recorderRef.current.stop();
+        }
+        releaseDevices();
     }, []);
 
-    function stopRecording() {
-        setRecording(false);
-        if (recordingIntervalRef.current) {
-            clearInterval(recordingIntervalRef.current);
-            recordingIntervalRef.current = null;
+    // The preview <video> only exists once the modal has rendered
+    useEffect(() => {
+        if (state === 'recording' && videoPreviewRef.current && streamRef.current) {
+            videoPreviewRef.current.srcObject = streamRef.current;
         }
-        mediaRecorderRef.current?.stop();
-        mediaRecorderRef.current?.stream.getTracks()
-            .forEach(track => track.stop());
-    }
+    }, [state]);
 
     async function startRecording() {
-        if (!user) return;
+        setError(null);
+        if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+            // browsers only expose the camera/microphone on HTTPS and localhost
+            setError(window.isSecureContext ? "Recording isn't supported in this browser" : 'Recording requires HTTPS');
+            return;
+        }
 
+        const mimeType = pickMimeType(config.mimeTypes);
         try {
-            setError(null);
-            setRecording(true);
+            const stream = await navigator.mediaDevices.getUserMedia(config.constraints);
+            streamRef.current = stream;
 
-            const stream = await navigator.mediaDevices.getUserMedia(mediaRecorderConfig.mediaStreamConstraints);
-            const mediaRecorder = new MediaRecorder(stream, mediaRecorderConfig.mediaRecorderOptions);
+            const recorder = new MediaRecorder(stream, {...config.recorderOptions, ...(mimeType ? {mimeType} : {})});
+            recorderRef.current = recorder;
+            chunksRef.current = [];
+            discardRef.current = false;
 
-            mediaRecorderRef.current = mediaRecorder;
-
-            if (videoPreviewRef.current) {
-                videoPreviewRef.current.srcObject = stream;
-            }
-
-            mediaRecorder.ondataavailable = (blobEvent: BlobEvent) => {
-                chunks.push(blobEvent.data);
+            recorder.ondataavailable = (event: BlobEvent) => {
+                if (event.data.size > 0) chunksRef.current.push(event.data);
             };
+            recorder.onstop = () => void finishRecording(recorder.mimeType || mimeType || '');
 
-            mediaRecorder.onstop = async () => {
-                try {
-                    await handleMediaUpload();
-                } catch (error) {
-                    console.error('Failed to upload media:', error);
-                    setError('Failed to send media message');
-                }
-            };
+            recorder.start(1000);
+            startedAtRef.current = Date.now();
+            setElapsedSeconds(0);
+            setState('recording');
 
-            mediaRecorder.start();
-            start();
-
-            setRecordingTime(0);
-            recordingIntervalRef.current = setInterval(() => {
-                setRecordingTime(prev => prev + 1);
-            }, 1000);
-        } catch (error) {
-            console.error('Failed to start recording:', error);
-            setError('Failed to access camera/microphone');
-            setRecording(false);
-            if (recordingIntervalRef.current) {
-                clearInterval(recordingIntervalRef.current);
-                recordingIntervalRef.current = null;
-            }
+            timerRef.current = setInterval(() => {
+                const seconds = Math.floor((Date.now() - startedAtRef.current) / 1000);
+                setElapsedSeconds(seconds);
+                if (seconds >= config.maxSeconds) stopRecording(false);
+            }, 250);
+        } catch (e) {
+            console.error('Failed to start recording:', e);
+            releaseDevices();
+            setError('Could not access camera/microphone');
         }
     }
 
-    async function handleMediaUpload() {
-        if (!user) return;
+    function stopRecording(discard: boolean) {
+        discardRef.current = discard;
+        stoppedAtRef.current = Date.now();
+        if (recorderRef.current?.state === 'recording') {
+            recorderRef.current.stop(); // flushes the last chunk, then onstop -> finishRecording
+        }
+        releaseDevices();
+    }
 
-        setUploading(true);
+    async function finishRecording(mimeType: string) {
+        recorderRef.current = null;
+        const chunks = chunksRef.current;
+        chunksRef.current = [];
+        if (discardRef.current || chunks.length === 0) {
+            setState('idle');
+            return;
+        }
 
+        setState('sending');
         try {
-            const mediaBlob = new Blob(chunks, mediaRecorderConfig.blobProperty);
-            const formData = new FormData();
-
-            const mimeType = mediaRecorderConfig.blobProperty.type;
-            if (!mimeType) {
-                throw new Error(`Unsupported file message type: ${type}`);
-            }
-
-            const extension = extractExtension(mimeType);
-            const fileName = `${chatId}_${user.id}_${Date.now()}.${extension}`;
-            const duration = stop();
-
-            formData.set("fileMessage", mediaBlob, fileName);
-
-            const messageMetadata = {
-                chatId: chatId,
-                senderId: user.id,
-                length: duration,
-                type: mediaRecorderConfig.messageType,
-            };
-
-            formData.set("chatMessage", new Blob([JSON.stringify(messageMetadata)], { type: "application/json" }));
-
-            // Upload file to server
-            const response = await api.chat.uploadFileMessage(formData);
-
-            // Send through E2E system
-            const fileUrl = fileName; // Use filename as fallback
-            const mediaInfo = `${mediaRecorderConfig.displayName}: ${fileUrl} (${formatDuration(duration)})`;
-
-            await handleSendMessage(mediaInfo, mediaRecorderConfig.messageType);
-
-        } catch (error) {
-            console.error('Failed to upload media:', error);
-            throw error;
+            const durationSeconds = Math.max(1, Math.round((stoppedAtRef.current - startedAtRef.current) / 1000));
+            const content = await encryptAndUploadMedia(chatId, new Blob(chunks, {type: mimeType}), durationSeconds);
+            await handleSendMessage(content, config.messageType);
+        } catch (e) {
+            console.error('Failed to send media message:', e);
+            setError(`Failed to send ${config.displayName.toLowerCase()}`);
         } finally {
-            setUploading(false);
-            resetChunks();
+            setState('idle');
         }
     }
 
-    function resetChunks() {
-        chunks.length = 0;
-    }
+    const timer = (
+        <span className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
+            <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"/>
+            {formatDuration(elapsedSeconds)} / {formatDuration(config.maxSeconds)}
+        </span>
+    );
 
-    function extractExtension(mimeType: string) {
-        const extensionBeg = mimeType.indexOf("/") + 1;
-        const codecStart = mimeType.indexOf(";");
-        const extensionEnd = codecStart > 0 ? codecStart : undefined;
-        return mimeType.substring(extensionBeg, extensionEnd);
-    }
-
-    function formatDuration(seconds: number): string {
-        const mins = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    }
-
-    const getButtonState = () => {
-        if (error) return 'error';
-        if (uploading) return 'uploading';
-        if (recording) return 'recording';
-        if (isDisabled) return 'disabled';
-        return 'idle';
-    };
-
-    const buttonState = getButtonState();
-
-    const buttonStyles = {
-        idle: "bg-gray-600 hover:bg-gray-700 text-white",
-        recording: "bg-red-600 hover:bg-red-700 text-white animate-pulse",
-        uploading: "bg-blue-600 text-white cursor-wait",
-        disabled: "bg-gray-400 text-gray-600 cursor-not-allowed",
-        error: "bg-red-500 text-white"
-    };
+    const recordingControls = (
+        <div className="flex items-center gap-2">
+            {timer}
+            <button
+                onClick={() => stopRecording(true)}
+                className="p-2 rounded-lg bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200"
+                title="Cancel"
+            >
+                <X size={16}/>
+            </button>
+            <button
+                onClick={() => stopRecording(false)}
+                className="flex items-center gap-1 px-3 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold"
+                title={`Send ${config.displayName.toLowerCase()}`}
+            >
+                <Send size={14}/>
+                <span>Send</span>
+            </button>
+        </div>
+    );
 
     return (
         <div className="flex flex-col items-center space-y-2">
-            {/* Error Message */}
             {error && (
                 <div className="flex items-center space-x-1 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 px-2 py-1 rounded">
-                    <AlertCircle size={12} />
+                    <AlertCircle size={12}/>
                     <span>{error}</span>
                 </div>
             )}
 
-            {/* Recording Duration */}
-            {recording && (
-                <div className="flex items-center space-x-1 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 px-2 py-1 rounded">
-                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-                    <span>{formatDuration(recordingTime)}</span>
-                </div>
-            )}
-
-            {/* Main Button */}
-            <button
-                onClick={recording ? stopRecording : startRecording}
-                disabled={isDisabled && !recording}
-                className={`
-                    relative px-3 py-2 rounded-lg font-semibold transition-all duration-300 
-                    text-xs min-w-[80px] flex items-center justify-center space-x-1
-                    ${buttonStyles[buttonState]}
-                    ${buttonState === 'idle' ? 'hover:scale-105 shadow-md hover:shadow-lg' : ''}
-                `}
-                title={
-                    error ? error :
-                        uploading ? 'Uploading...' :
-                            recording ? `Stop ${mediaRecorderConfig.displayName.toLowerCase()}` :
-                                isEncrypting ? 'Encrypting message...' :
-                                    disabled ? 'Disabled' :
-                                        `Record ${mediaRecorderConfig.displayName.toLowerCase()}`
-                }
-            >
-                {uploading ? (
-                    <>
-                        <Upload size={16} className="animate-pulse" />
-                        <span>Uploading...</span>
-                    </>
-                ) : error ? (
-                    <>
-                        <AlertCircle size={16} />
-                        <span>Error</span>
-                    </>
-                ) : recording ? (
-                    mediaRecorderConfig.enabledUI
-                ) : (
-                    <>
-                        {mediaRecorderConfig.disabledUI}
-                        <Lock size={8} className="opacity-60" />
-                    </>
-                )}
-
-                {recording && type === FileMessageType.VIDEO && (
-                    <VideoMessagePreviewModal videoPreviewRef={videoPreviewRef} />
-                )}
-            </button>
-
-            {/* E2E Warning for Media */}
-            {!recording && !uploading && (
-                <div className="text-xs text-amber-600 dark:text-amber-400 text-center max-w-[100px]">
-                    <div className="flex items-center space-x-1">
-                        <AlertCircle size={10} />
-                        <span>File E2E coming soon</span>
-                    </div>
-                </div>
+            {state === 'recording' ? (
+                type === FileMessageType.VIDEO ? (
+                    <VideoMessagePreviewModal videoPreviewRef={videoPreviewRef}>
+                        {recordingControls}
+                    </VideoMessagePreviewModal>
+                ) : recordingControls
+            ) : (
+                <button
+                    onClick={startRecording}
+                    disabled={disabled || isEncrypting || state === 'sending'}
+                    className="relative px-3 py-2 rounded-lg font-semibold transition-all duration-300 text-xs min-w-[80px] flex items-center justify-center space-x-1 bg-gray-600 hover:bg-gray-700 text-white disabled:bg-gray-400 disabled:text-gray-600 disabled:cursor-not-allowed"
+                    title={`Record ${config.displayName.toLowerCase()} (end-to-end encrypted)`}
+                >
+                    {state === 'sending' ? (
+                        <>
+                            <Upload size={16} className="animate-pulse"/>
+                            <span>Sending…</span>
+                        </>
+                    ) : (
+                        <>
+                            {config.idleUI}
+                            <Lock size={8} className="opacity-60"/>
+                        </>
+                    )}
+                </button>
             )}
         </div>
     );

@@ -9,6 +9,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { Loading } from "@/components/Loading";
 import { Client, Message } from "@stomp/stompjs";
 import AudioCall from "@/components/chats/messages/AudioCallComponent";
+import { EncryptedMediaPlayer } from "@/components/chats/messages/EncryptedMediaPlayer";
 import { ChatRoomDetails } from "@/components/chats/ChatRoomDetails";
 import { defaultPfp } from "../../../public/modules/defaultPfp";
 import {
@@ -117,10 +118,8 @@ const TextMessage: React.FC<MessageProps> = ({ message, isOwn, onRead }) => {
     );
 };
 
-// Голосовое сообщение
-const AudioMessage: React.FC<MessageProps> = ({ message, isOwn, onRead }) => {
-    const [isPlaying, setIsPlaying] = useState(false);
-
+// Голосовое / видео сообщение: the content is an encrypted-file reference, played by EncryptedMediaPlayer
+const MediaMessage: React.FC<MessageProps & { kind: "audio" | "video" }> = ({ message, isOwn, onRead, kind }) => {
     const handleClick = () => {
         if (!isOwn && message.status !== ChatMessageStatus.RECEIVED) {
             onRead(message);
@@ -128,98 +127,32 @@ const AudioMessage: React.FC<MessageProps> = ({ message, isOwn, onRead }) => {
     };
 
     return (
-        <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'} mb-3`}>
+        <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'} mb-3`} onClick={handleClick}>
             <div
-                className={`max-w-xs lg:max-w-md px-4 py-3 rounded-2xl relative group cursor-pointer transition-all duration-200 hover:shadow-lg ${
+                className={`max-w-xs lg:max-w-md px-4 py-3 rounded-2xl relative group transition-all duration-200 hover:shadow-lg ${
                     isOwn
                         ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white'
                         : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white'
                 }`}
-                onClick={handleClick}
             >
-                <div className="flex items-center space-x-3">
-                    <button
-                        className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                            isOwn ? 'bg-white/20' : 'bg-blue-500'
-                        }`}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setIsPlaying(!isPlaying);
-                        }}
-                    >
-                        {isPlaying ? (
-                            <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
-                        ) : (
-                            <div className="w-0 h-0 border-l-[6px] border-l-white border-t-[3px] border-t-transparent border-b-[3px] border-b-transparent ml-0.5" />
-                        )}
-                    </button>
+                <EncryptedMediaPlayer chatId={message.chatId} content={message.content} kind={kind} />
 
-                    <div className="flex-1">
-                        <div className="flex items-center space-x-2">
-                            <div className="flex space-x-1">
-                                {[...Array(12)].map((_, i) => (
-                                    <div
-                                        key={i}
-                                        className={`w-1 rounded-full ${
-                                            isOwn ? 'bg-white/40' : 'bg-gray-300 dark:bg-gray-600'
-                                        }`}
-                                        style={{ height: Math.random() * 20 + 8 }}
-                                    />
-                                ))}
-                            </div>
-                        </div>
-                        <div className={`text-xs mt-1 ${
-                            isOwn ? 'text-blue-100' : 'text-gray-500 dark:text-gray-400'
-                        }`}>
-                            Voice Message • {formatMessageTime(message.createdAt)}
-                        </div>
-                    </div>
-
-                    <Lock size={12} className={isOwn ? 'text-blue-200' : 'text-green-500'} />
+                <div className={`flex items-center justify-end mt-1 space-x-1 text-xs ${
+                    isOwn ? 'text-blue-100' : 'text-gray-500 dark:text-gray-400'
+                }`}>
+                    <Lock size={10} />
+                    <span>{kind === "audio" ? "Voice message" : "Video message"} • {formatMessageTime(message.createdAt)}</span>
+                    {isOwn && message.status === ChatMessageStatus.DELIVERED && <Check size={12} className="text-blue-200" />}
+                    {isOwn && message.status === ChatMessageStatus.RECEIVED && <CheckCheck size={12} className="text-green-300" />}
                 </div>
             </div>
         </div>
     );
 };
 
-// Видео сообщение
-const VideoMessage: React.FC<MessageProps> = ({ message, isOwn, onRead }) => {
-    return (
-        <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'} mb-3`}>
-            <div
-                className={`max-w-xs lg:max-w-md rounded-2xl relative group cursor-pointer transition-all duration-200 hover:shadow-lg overflow-hidden ${
-                    isOwn ? 'bg-blue-500' : 'bg-gray-100 dark:bg-gray-800'
-                }`}
-                onClick={() => !isOwn && onRead(message)}
-            >
-                {/* Video Thumbnail */}
-                <div className="aspect-video bg-gradient-to-br from-gray-200 to-gray-300 dark:from-gray-700 dark:to-gray-800 flex items-center justify-center">
-                    <Video size={32} className="text-gray-500 dark:text-gray-400" />
-                </div>
+const AudioMessage: React.FC<MessageProps> = (props) => <MediaMessage {...props} kind="audio" />;
 
-                {/* Play Button Overlay */}
-                <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="w-12 h-12 bg-black/50 rounded-full flex items-center justify-center">
-                        <div className="w-0 h-0 border-l-[8px] border-l-white border-t-[6px] border-t-transparent border-b-[6px] border-b-transparent ml-1" />
-                    </div>
-                </div>
-
-                {/* E2E Badge */}
-                <div className="absolute top-2 right-2 bg-green-500 rounded-full p-1">
-                    <Lock size={8} className="text-white" />
-                </div>
-
-                {/* Footer */}
-                <div className="p-2 bg-black/20">
-                    <div className="flex items-center justify-between text-xs text-white">
-                        <span>Video Message</span>
-                        <span>{formatMessageTime(message.createdAt)}</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-};
+const VideoMessage: React.FC<MessageProps> = (props) => <MediaMessage {...props} kind="video" />;
 
 const SystemMessage: React.FC<MessageProps> = ({ message }) => {
     return (
