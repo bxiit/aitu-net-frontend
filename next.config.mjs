@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+    // Minimal self-contained server for the Docker image (see Dockerfile)
+    output: "standalone",
     experimental: {
         missingSuspenseWithCSRBailout: false,
     },
