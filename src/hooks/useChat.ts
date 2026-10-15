@@ -26,6 +26,13 @@ export function useChat() {
     const readMessagesRef = useRef<Map<string, DecryptedMessage>>(new Map())
     const [newMessagesCount, setNewMessagesCount] = useState<Map<string, number>>(new Map())
 
+    // onConnected/onMessageReceived are registered once per WebSocket connection, so they would keep the
+    // state from that render forever; they read current state through these refs instead.
+    const chatRoomsRef = useRef(chatRooms)
+    const participantKeysRef = useRef(participantKeys)
+    useEffect(() => { chatRoomsRef.current = chatRooms }, [chatRooms])
+    useEffect(() => { participantKeysRef.current = participantKeys }, [participantKeys])
+
     const SOCKET_URL: string = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "defaultWebSocketUrl"
     const encryptionService = E2EEncryptionService.getInstance()
 
@@ -51,11 +58,19 @@ export function useChat() {
         }
     }, [user])
 
+    // Unread counts come from the server once per room; after that they're kept up to date locally
+    // (incremented in onMessageReceived, decremented in markMessageAsRead).
+    const countedRoomsRef = useRef<Set<string>>(new Set())
+    // One request per chat's keys, shared by concurrent callers (history load, selectChat, sendMessage)
+    const keyRequestsRef = useRef<Map<string, Promise<Record<string, string>>>>(new Map())
+
     useEffect(() => {
-        if (chatRooms.size === 0) return
+        const uncounted = [...chatRooms.keys()].filter(chatId => !countedRoomsRef.current.has(chatId))
+        if (uncounted.length === 0) return
+        uncounted.forEach(chatId => countedRoomsRef.current.add(chatId))
 
         const loadMessageCounts = async () => {
-            for (const chatId of chatRooms.keys()) {
+            for (const chatId of uncounted) {
                 try {
                     const response = await api.chat.countNewMessages(chatId)
                     const count = response.data.count
@@ -74,15 +89,18 @@ export function useChat() {
         loadMessageCounts()
     }, [chatRooms])
 
-    const onConnected = () => {
+    const onConnected = async () => {
         if (!user) return
         console.log("🔌 Connected to WebSocket")
 
         stompClientRef.current?.subscribe(`/user/${user.id}/queue/messages`, onMessageReceived)
 
+        // Rooms first, so the strategy can find an existing chat instead of creating it again
+        const rooms = await fetchAndSetChats(user.id)
+
         const deps: StrategyDeps = {
             searchParams: searchParams,
-            chatRooms: chatRooms,
+            chatRooms: rooms,
             api: api,
             pushToChatRooms: pushToChatRooms
         }
@@ -99,8 +117,6 @@ export function useChat() {
             .catch(error => {
                 console.error("Strategy failed:", error)
             })
-
-        fetchAndSetChats(user.id)
     }
 
     const onMessageReceived = async (message: Message) => {
@@ -110,8 +126,15 @@ export function useChat() {
             const encryptedMessage: ChatMessage = messageObject.message
             console.log('🔒 Received encrypted message for chat:', encryptedMessage.chatId)
 
-            if (!chatRooms.has(encryptedMessage.chatId)) {
+            if (!chatRoomsRef.current.has(encryptedMessage.chatId)) {
+                // a new chat: its unread count (including this message) comes from the server
                 fetchAndSetChatRooms()
+            } else if (encryptedMessage.senderId !== user?.id) {
+                setNewMessagesCount(prev => {
+                    const newState = new Map(prev)
+                    newState.set(encryptedMessage.chatId, (newState.get(encryptedMessage.chatId) ?? 0) + 1)
+                    return newState
+                })
             }
 
             try {
@@ -145,14 +168,10 @@ export function useChat() {
         }
         console.log('📤 Sending message to chat:', chatId)
         try {
-            let keys = participantKeys.get(chatId)
+            let keys = participantKeysRef.current.get(chatId)
             if (!keys) {
                 console.log('🔑 Loading participant keys...')
-                await loadChatParticipantKeys(chatId)
-                keys = participantKeys.get(chatId)
-                if (!keys) {
-                    throw new Error('Failed to load participant keys')
-                }
+                keys = await loadChatParticipantKeys(chatId)
             }
             console.log('🔒 Encrypting message...')
             const { encryptedContent, encryptedKeys } = await encryptionService.encryptMessage(messageText, keys)
@@ -205,7 +224,7 @@ export function useChat() {
         }
     }
 
-    const fetchAndSetChats = async (userId?: string) => {
+    const fetchAndSetChats = async (userId?: string): Promise<Map<string, ChatRoom>> => {
         try {
             console.log('Logging before fetch userId', userId)
             const response = await api.chat.fetchChats(userId)
@@ -219,7 +238,7 @@ export function useChat() {
             for (const chat of chats) {
                 const decryptedMessages: DecryptedMessage[] = []
 
-                if (!participantKeys.has(chat.chatRoom.chatId)) {
+                if (!participantKeysRef.current.has(chat.chatRoom.chatId)) {
                     await loadChatParticipantKeys(chat.chatRoom.chatId)
                 }
 
@@ -239,29 +258,37 @@ export function useChat() {
             setChatRoomMessages(decryptedMessagesMap)
 
             console.log('✅ All messages decrypted and loaded')
+            return rooms
         } catch (error) {
             console.error('Failed to fetch chats:', error)
+            return new Map()
         }
     }
 
-    const loadChatParticipantKeys = async (chatId: string) => {
-        try {
-            console.log('🔑 Loading keys for chat:', chatId)
+    const loadChatParticipantKeys = (chatId: string): Promise<Record<string, string>> => {
+        const existing = keyRequestsRef.current.get(chatId)
+        if (existing) return existing
 
-            const response = await api.chat.getChatParticipantKeys(chatId)
-            const keys = response.data
-
-            setParticipantKeys(prev => {
-                const newKeys = new Map(prev)
-                newKeys.set(chatId, keys)
-                return newKeys
+        console.log('🔑 Loading keys for chat:', chatId)
+        const request = api.chat.getChatParticipantKeys(chatId)
+            .then(response => {
+                const keys = response.data
+                setParticipantKeys(prev => {
+                    const newKeys = new Map(prev)
+                    newKeys.set(chatId, keys)
+                    return newKeys
+                })
+                console.log('✅ Keys loaded for', Object.keys(keys).length, 'participants')
+                return keys
             })
-
-            console.log('✅ Keys loaded for', Object.keys(keys).length, 'participants')
-        } catch (error) {
-            console.error('❌ Failed to load participant keys:', error)
-            throw error
-        }
+            .catch(error => {
+                // allow a retry, e.g. once a participant without keys has logged in and set them up
+                keyRequestsRef.current.delete(chatId)
+                console.error('❌ Failed to load participant keys:', error)
+                throw error
+            })
+        keyRequestsRef.current.set(chatId, request)
+        return request
     }
 
     const selectChat = async (chatId: string) => {
@@ -274,7 +301,7 @@ export function useChat() {
 
         setCurrentChatId(chatId)
 
-        if (!participantKeys.has(chatId)) {
+        if (!participantKeysRef.current.has(chatId)) {
             console.log('🔑 Loading participant keys...')
             await loadChatParticipantKeys(chatId)
         }

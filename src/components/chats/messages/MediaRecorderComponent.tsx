@@ -189,30 +189,31 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
         }
     }
 
-    const timer = (
-        <span className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
-            <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"/>
-            {formatDuration(elapsedSeconds)} / {formatDuration(config.maxSeconds)}
-        </span>
-    );
-
-    const recordingControls = (
-        <div className="flex items-center gap-2">
-            {timer}
+    // Compact pill that takes the button's place in the input bar while a voice message records
+    const voiceRecordingControls = (
+        <div className="flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 py-1 pl-3 pr-1 dark:border-red-800 dark:bg-red-900/30">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-red-500 animate-pulse"/>
+            <span className="text-sm font-medium tabular-nums text-red-700 dark:text-red-300">
+                {formatDuration(elapsedSeconds)}
+            </span>
+            <span className="hidden text-xs tabular-nums text-red-400 sm:inline">
+                / {formatDuration(config.maxSeconds)}
+            </span>
             <button
                 onClick={() => stopRecording(true)}
-                className="p-2 rounded-lg bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200"
+                aria-label="Cancel recording"
                 title="Cancel"
+                className="ml-1 flex h-8 w-8 items-center justify-center rounded-full text-red-600 transition hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-800/50"
             >
                 <X size={16}/>
             </button>
             <button
                 onClick={() => stopRecording(false)}
-                className="flex items-center gap-1 px-3 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold"
-                title={`Send ${config.displayName.toLowerCase()}`}
+                aria-label={`Send ${config.displayName.toLowerCase()}`}
+                title="Send"
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-red-600 text-white shadow-sm transition hover:bg-red-700 active:scale-95"
             >
                 <Send size={14}/>
-                <span>Send</span>
             </button>
         </div>
     );
@@ -228,10 +229,14 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
 
             {state === 'recording' ? (
                 type === FileMessageType.VIDEO ? (
-                    <VideoMessagePreviewModal videoPreviewRef={videoPreviewRef}>
-                        {recordingControls}
-                    </VideoMessagePreviewModal>
-                ) : recordingControls
+                    <VideoMessagePreviewModal
+                        videoPreviewRef={videoPreviewRef}
+                        elapsedSeconds={elapsedSeconds}
+                        maxSeconds={config.maxSeconds}
+                        onCancel={() => stopRecording(true)}
+                        onSend={() => stopRecording(false)}
+                    />
+                ) : voiceRecordingControls
             ) : (
                 <button
                     onClick={startRecording}
