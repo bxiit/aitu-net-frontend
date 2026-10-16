@@ -11,6 +11,8 @@ interface E2EMediaRecorderProps {
     handleSendMessage: (messageData: string, messageType: MessageType) => Promise<void>;
     isEncrypting?: boolean;
     disabled?: boolean;
+    // lets the input bar hide its other controls while this recorder is active
+    onRecordingChange?: (recording: boolean) => void;
 }
 
 export enum FileMessageType {
@@ -67,6 +69,8 @@ const mediaRecorderConfigRecord: Record<FileMessageType, MediaTypeConfig> = {
     }
 }
 
+const LEVEL_BARS = 28;
+
 function pickMimeType(candidates: string[]): string | undefined {
     return candidates.find(type => MediaRecorder.isTypeSupported(type));
 }
@@ -76,12 +80,15 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
                                                                             handleSendMessage,
                                                                             type,
                                                                             isEncrypting = false,
-                                                                            disabled = false
+                                                                            disabled = false,
+                                                                            onRecordingChange
                                                                         }) => {
     const config = mediaRecorderConfigRecord[type];
     const [state, setState] = useState<'idle' | 'recording' | 'sending'>('idle');
     const [error, setError] = useState<string | null>(null);
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
+    // recent microphone levels (0..1), newest last, for the live meter in the voice pill
+    const [levels, setLevels] = useState<number[]>([]);
 
     const recorderRef = useRef<MediaRecorder | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
@@ -91,11 +98,32 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
     const stoppedAtRef = useRef(0);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const videoPreviewRef = useRef<HTMLVideoElement>(null);
+    const levelMeterRef = useRef<{ context: AudioContext; interval: ReturnType<typeof setInterval> } | null>(null);
+
+    function startLevelMeter(stream: MediaStream) {
+        const context = new AudioContext();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 512;
+        context.createMediaStreamSource(stream).connect(analyser);
+        const samples = new Float32Array(analyser.fftSize);
+        const interval = setInterval(() => {
+            analyser.getFloatTimeDomainData(samples);
+            const rms = Math.sqrt(samples.reduce((sum, v) => sum + v * v, 0) / samples.length);
+            // speech RMS is small; scale it into a visible 0..1 range
+            setLevels(prev => [...prev.slice(-(LEVEL_BARS - 1)), Math.min(1, rms * 6)]);
+        }, 100);
+        levelMeterRef.current = {context, interval};
+    }
 
     function releaseDevices() {
         if (timerRef.current) {
             clearInterval(timerRef.current);
             timerRef.current = null;
+        }
+        if (levelMeterRef.current) {
+            clearInterval(levelMeterRef.current.interval);
+            void levelMeterRef.current.context.close();
+            levelMeterRef.current = null;
         }
         // stopping the tracks turns the camera/microphone indicator off
         streamRef.current?.getTracks().forEach(track => track.stop());
@@ -110,6 +138,14 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
         }
         releaseDevices();
     }, []);
+
+    // Tell the input bar while recording; the cleanup also runs if the recorder unmounts mid-recording
+    useEffect(() => {
+        if (state !== 'recording') return;
+        onRecordingChange?.(true);
+        return () => onRecordingChange?.(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [state]);
 
     // The preview <video> only exists once the modal has rendered
     useEffect(() => {
@@ -144,6 +180,8 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
             recorder.start(1000);
             startedAtRef.current = Date.now();
             setElapsedSeconds(0);
+            setLevels([]);
+            if (type === FileMessageType.AUDIO) startLevelMeter(stream);
             setState('recording');
 
             timerRef.current = setInterval(() => {
@@ -189,21 +227,32 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
         }
     }
 
-    // Compact pill that takes the button's place in the input bar while a voice message records
+    // Takes the whole input row while a voice message records (the input bar hides its other controls)
     const voiceRecordingControls = (
-        <div className="flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 py-1 pl-3 pr-1 dark:border-red-800 dark:bg-red-900/30">
+        <div className="flex w-full min-w-0 items-center gap-2 rounded-full border border-red-200 bg-red-50 py-1 pl-3 pr-1 dark:border-red-800 dark:bg-red-900/30">
             <span className="h-2 w-2 shrink-0 rounded-full bg-red-500 animate-pulse"/>
-            <span className="text-sm font-medium tabular-nums text-red-700 dark:text-red-300">
+            <span className="shrink-0 text-sm font-medium tabular-nums text-red-700 dark:text-red-300">
                 {formatDuration(elapsedSeconds)}
             </span>
-            <span className="hidden text-xs tabular-nums text-red-400 sm:inline">
-                / {formatDuration(config.maxSeconds)}
+            {/* live microphone level, newest on the right */}
+            <div className="flex h-6 min-w-0 flex-1 items-center justify-end gap-[2px] overflow-hidden" aria-hidden="true">
+                {Array.from({length: LEVEL_BARS}, (_, i) => {
+                    const level = levels[levels.length - LEVEL_BARS + i] ?? 0;
+                    return (
+                        <span key={i}
+                              className="w-[3px] shrink-0 rounded-full bg-red-400/80 transition-[height] duration-100 dark:bg-red-300/70"
+                              style={{height: `${Math.max(12, level * 100)}%`}}/>
+                    );
+                })}
+            </div>
+            <span className="hidden shrink-0 text-xs tabular-nums text-red-400 sm:inline">
+                {formatDuration(config.maxSeconds)}
             </span>
             <button
                 onClick={() => stopRecording(true)}
                 aria-label="Cancel recording"
                 title="Cancel"
-                className="ml-1 flex h-8 w-8 items-center justify-center rounded-full text-red-600 transition hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-800/50"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-red-600 transition hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-800/50"
             >
                 <X size={16}/>
             </button>
@@ -211,7 +260,7 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
                 onClick={() => stopRecording(false)}
                 aria-label={`Send ${config.displayName.toLowerCase()}`}
                 title="Send"
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-red-600 text-white shadow-sm transition hover:bg-red-700 active:scale-95"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-600 text-white shadow-sm transition hover:bg-red-700 active:scale-95"
             >
                 <Send size={14}/>
             </button>
@@ -219,7 +268,7 @@ export const MediaRecorderComponent: React.FC<E2EMediaRecorderProps> = ({
     );
 
     return (
-        <div className="flex flex-col items-center space-y-2">
+        <div className="flex w-full flex-col items-center space-y-2">
             {error && (
                 <div className="flex items-center space-x-1 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 px-2 py-1 rounded">
                     <AlertCircle size={12}/>

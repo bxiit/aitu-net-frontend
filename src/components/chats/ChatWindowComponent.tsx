@@ -126,25 +126,40 @@ const MediaMessage: React.FC<MessageProps & { kind: "audio" | "video" }> = ({ me
         }
     };
 
+    const footer = (onBubble: boolean) => (
+        <div className={`flex items-center justify-end mt-1 space-x-1 text-xs ${
+            onBubble && isOwn ? 'text-blue-100' : 'text-gray-500 dark:text-gray-400'
+        }`}>
+            <Lock size={10} />
+            <span>{formatMessageTime(message.createdAt)}</span>
+            {isOwn && message.status === ChatMessageStatus.DELIVERED && <Check size={12} />}
+            {isOwn && message.status === ChatMessageStatus.RECEIVED && <CheckCheck size={12} className="text-green-500" />}
+        </div>
+    );
+
+    // video notes stand on their own, without a bubble
+    if (kind === "video") {
+        return (
+            <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'} mb-3`} onClick={handleClick}>
+                <div className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'}`}>
+                    <EncryptedMediaPlayer chatId={message.chatId} content={message.content} kind="video" own={isOwn} />
+                    {footer(false)}
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'} mb-3`} onClick={handleClick}>
             <div
-                className={`max-w-xs lg:max-w-md px-4 py-3 rounded-2xl relative group transition-all duration-200 hover:shadow-lg ${
+                className={`max-w-xs lg:max-w-md px-3 py-2.5 rounded-2xl relative transition-all duration-200 hover:shadow-lg ${
                     isOwn
-                        ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white'
-                        : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white'
+                        ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-br-md'
+                        : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white rounded-bl-md'
                 }`}
             >
-                <EncryptedMediaPlayer chatId={message.chatId} content={message.content} kind={kind} />
-
-                <div className={`flex items-center justify-end mt-1 space-x-1 text-xs ${
-                    isOwn ? 'text-blue-100' : 'text-gray-500 dark:text-gray-400'
-                }`}>
-                    <Lock size={10} />
-                    <span>{kind === "audio" ? "Voice message" : "Video message"} • {formatMessageTime(message.createdAt)}</span>
-                    {isOwn && message.status === ChatMessageStatus.DELIVERED && <Check size={12} className="text-blue-200" />}
-                    {isOwn && message.status === ChatMessageStatus.RECEIVED && <CheckCheck size={12} className="text-green-300" />}
-                </div>
+                <EncryptedMediaPlayer chatId={message.chatId} content={message.content} kind="audio" own={isOwn} />
+                {footer(true)}
             </div>
         </div>
     );
