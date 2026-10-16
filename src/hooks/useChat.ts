@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatMessage, ChatMessageStatus, DecryptedMessage, MessageType } from "@/models/chat/ChatMessage";
-import { Client, Message } from "@stomp/stompjs";
+import { Client, Message, ReconnectionTimeMode } from "@stomp/stompjs";
 import { useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthProvider";
 import { api } from "@/lib";
@@ -36,6 +36,11 @@ export function useChat() {
     const SOCKET_URL: string = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "defaultWebSocketUrl"
     const encryptionService = E2EEncryptionService.getInstance()
 
+    // true once the first connect has loaded everything; later connects are reconnects and refresh cheaply
+    const hasInitializedRef = useRef(false)
+    // bumped on every (re)connect so component subscriptions (presence, signaling) re-subscribe on the new session
+    const [connectionEpoch, setConnectionEpoch] = useState(0)
+
     useEffect(() => {
         if (!user) return
 
@@ -43,7 +48,12 @@ export function useChat() {
 
         const stompClient = new Client({
             webSocketFactory: () => new SockJS(SOCKET_URL),
-            debug: console.log,
+            // Exponential backoff from a per-client randomised base: after a server restart 10k clients don't all
+            // retry on the same 5s tick, which would hammer the server as it comes back up.
+            reconnectDelay: 2000 + Math.floor(Math.random() * 4000),
+            reconnectTimeMode: ReconnectionTimeMode.EXPONENTIAL,
+            maxReconnectDelay: 60_000,
+            connectionTimeout: 10_000,
             onConnect: onConnected,
             onStompError: (frame) => console.error(`STOMP Error: ${frame.body}`),
         })
@@ -92,30 +102,71 @@ export function useChat() {
         if (!user) return
         console.log("🔌 Connected to WebSocket")
 
-        stompClientRef.current?.subscribe(`/user/${user.id}/queue/messages`, onMessageReceived)
+        // subscriptions are per session, so (re)subscribe on every connect and let components do the same via the epoch
+        stompClientRef.current?.subscribe('/user/queue/messages', onMessageReceived)
+        setConnectionEpoch(epoch => epoch + 1)
 
-        // Rooms first, so the strategy can find an existing chat instead of creating it again
-        const rooms = await fetchAndSetChats(user.id)
+        if (!hasInitializedRef.current) {
+            hasInitializedRef.current = true
 
-        const deps: StrategyDeps = {
-            searchParams: searchParams,
-            chatRooms: rooms,
-            api: api,
-            pushToChatRooms: pushToChatRooms
+            // Rooms first, so the strategy can find an existing chat instead of creating it again
+            const rooms = await fetchAndSetChats(user.id)
+
+            const deps: StrategyDeps = {
+                searchParams: searchParams,
+                chatRooms: rooms,
+                api: api,
+                pushToChatRooms: pushToChatRooms
+            }
+
+            const chatIdStrategy = getStrategy(deps)
+            console.log("🎯 Chat Strategy:", chatIdStrategy.constructor.name)
+
+            chatIdStrategy.getChatId()
+                .then(chatId => {
+                    if (chatId) {
+                        selectChat(chatId)
+                    }
+                })
+                .catch(error => {
+                    console.error("Strategy failed:", error)
+                })
+            return
         }
 
-        const chatIdStrategy = getStrategy(deps)
-        console.log("🎯 Chat Strategy:", chatIdStrategy.constructor.name)
+        // Reconnect: don't reload and re-decrypt every chat's history. Refresh the room list and unread counts
+        // (cheap, and catches messages missed while offline), and reload only the chat currently open.
+        console.log("♻️ Reconnected, refreshing")
+        countedRoomsRef.current.clear()
+        await fetchAndSetChatRooms(user.id)
+        const openChat = currentChatIdRef.current
+        if (openChat) {
+            await reloadChatMessages(openChat)
+        }
+    }
 
-        chatIdStrategy.getChatId()
-            .then(chatId => {
-                if (chatId) {
-                    selectChat(chatId)
+    const reloadChatMessages = async (chatId: string) => {
+        try {
+            if (!participantKeysRef.current.has(chatId)) {
+                await loadChatParticipantKeys(chatId)
+            }
+            const encrypted = (await api.chat.fetchChatMessages(chatId)).data
+            const decrypted: DecryptedMessage[] = []
+            for (const message of encrypted) {
+                try {
+                    decrypted.push(await decryptReceivedMessage(message))
+                } catch (error) {
+                    console.error('Failed to decrypt message on reload:', error)
                 }
+            }
+            setChatRoomMessages(prev => {
+                const newMessages = new Map(prev)
+                newMessages.set(chatId, decrypted)
+                return newMessages
             })
-            .catch(error => {
-                console.error("Strategy failed:", error)
-            })
+        } catch (error) {
+            console.error('Failed to reload chat messages:', error)
+        }
     }
 
     const onMessageReceived = async (message: Message) => {
@@ -392,6 +443,7 @@ export function useChat() {
 
         selectChat,
         sendMessage,
+        connectionEpoch,
 
         stompClientRef
     }

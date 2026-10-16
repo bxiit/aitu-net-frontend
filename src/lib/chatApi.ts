@@ -4,6 +4,7 @@ import {ChatRoom} from "@/models/chat/ChatRoom";
 import {AxiosResponse} from "axios";
 import {ChatRoomWithMessages} from "@/models/chat/ChatRoomWithMessages";
 import {NewChatRoomRequest} from "@/models/chat/NewChatRoomRequest";
+import {ChatMessage} from "@/models/chat/ChatMessage";
 
 export const chatApi = {
     fetchChatRooms: (idOrEmail?: string): Promise<AxiosResponse<ChatRoom[]>> =>
@@ -32,6 +33,10 @@ export const chatApi = {
 
     fetchChats: (userId?: string): Promise<AxiosResponse<ChatRoomWithMessages[]>> =>
         (request<ChatRoomWithMessages[]>(`/chats/${userId ?? ''}`)),
+
+    /** Messages of a single chat (encrypted); used to reload just the open chat after a reconnect. */
+    fetchChatMessages: (chatId: string): Promise<AxiosResponse<ChatMessage[]>> =>
+        (request<ChatMessage[]>(`/chats/rooms/${chatId}/messages`)),
 
     countNewMessages: (chatId: string): Promise<AxiosResponse<{ count: number }>> =>
         (request<{ count: number }>(`/chats/rooms/${chatId}/messages/count`)),

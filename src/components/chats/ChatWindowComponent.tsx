@@ -8,7 +8,7 @@ import { useAuth } from "@/context/AuthProvider";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Loading } from "@/components/Loading";
 import { Client, Message } from "@stomp/stompjs";
-import AudioCall from "@/components/chats/messages/AudioCallComponent";
+import {useCall} from "@/context/CallProvider";
 import { EncryptedMediaPlayer } from "@/components/chats/messages/EncryptedMediaPlayer";
 import { ChatRoomDetails } from "@/components/chats/ChatRoomDetails";
 import { defaultPfp } from "../../../public/modules/defaultPfp";
@@ -16,9 +16,10 @@ import {
     ArrowLeft,
     MessageCircle,
     MoreVertical,
+    Phone,
+    Video,
     Sparkles,
     Users,
-    Video,
     Wifi,
     WifiOff,
     Shield,
@@ -35,6 +36,7 @@ interface ChatWindowComponentProps {
     chatRoom: ChatRoom;
     stompClientRef: RefObject<Client | null>;
     currentChatId: string;
+    connectionEpoch: number;
     selectChat: (chatId: string) => Promise<void>;
     handleSendMessage: (messageText: string, messageType?: MessageType) => Promise<void>;
 }
@@ -192,14 +194,11 @@ const E2EMessageRenderer = (currentUserId: string) => {
 // ===== ГЛАВНЫЙ КОМПОНЕНТ =====
 type ConnectionStatus = "OFFLINE" | "ONLINE";
 
-interface StatusMessage {
-    status: ConnectionStatus;
-}
-
 export const ChatWindowComponent = ({
                                         chatRoom,
                                         chatMessages,
                                         stompClientRef,
+                                        connectionEpoch,
                                         currentChatId,
                                         handleSendMessage,
                                         selectChat
@@ -207,6 +206,7 @@ export const ChatWindowComponent = ({
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const { user } = useAuth();
     const isMobile = useIsMobile();
+    const call = useCall();
     const [chatDetailsOpen, setChatDetailsOpen] = useState<boolean>(false);
     const [connStatus, setConnStatus] = useState<ConnectionStatus | undefined>(undefined);
     const [isScrolledUp, setIsScrolledUp] = useState(false);
@@ -239,37 +239,27 @@ export const ChatWindowComponent = ({
     useEffect(() => {
         if (!currentChatId) return;
 
-        let destination: string;
-        if (chatRoom.chatRoomType === ChatRoomType.ONE_TO_ONE) {
-            const companion = chatRoom.participants.find(participant => participant.id !== user.id);
-            if (!companion) {
-                throw new Error("Companion not present in one to one chat room");
-            }
-
-            setConnStatus(companion.connected ? "ONLINE" : "OFFLINE");
-            destination = `/user/${companion.id}/queue/status`;
-            subscribeForStatus(destination);
+        if (chatRoom.chatRoomType !== ChatRoomType.ONE_TO_ONE) return;
+        const companion = chatRoom.participants.find(participant => participant.id !== user.id);
+        if (!companion) {
+            throw new Error("Companion not present in one to one chat room");
         }
 
-        return () => {
-            if (destination && stompClientRef.current) {
-                stompClientRef.current.unsubscribe(destination);
+        setConnStatus(companion.connected ? "ONLINE" : "OFFLINE");
+        // presence is a shared broadcast; keep only this companion's updates
+        const subscription = stompClientRef.current?.subscribe("/topic/presence", (message: Message) => {
+            const update: { userId: string; status: ConnectionStatus } = JSON.parse(message.body);
+            if (update.userId === companion.id) {
+                setConnStatus(update.status);
             }
-        };
-    }, [currentChatId, chatRoom, user.id, stompClientRef]);
+        });
+
+        return () => subscription?.unsubscribe();
+    }, [currentChatId, chatRoom, user.id, stompClientRef, connectionEpoch]);
 
     useEffect(() => {
         scrollToBottom();
     }, [chatMessages]);
-
-    function subscribeForStatus(destination: string) {
-        stompClientRef.current?.subscribe(destination, onStatusReceived);
-    }
-
-    function onStatusReceived(message: Message) {
-        const statusMessage: StatusMessage = JSON.parse(message.body);
-        setConnStatus(statusMessage.status);
-    }
 
     // Render message using E2E renderer
     function displayChatMessage(message: DecryptedMessage) {
@@ -335,7 +325,7 @@ export const ChatWindowComponent = ({
     const chatDisplayName = getChatDisplayName();
 
     return (
-        <main className="flex-1 flex flex-col h-screen bg-gradient-to-br from-slate-50 via-white to-indigo-50/30 dark:from-gray-900 dark:via-gray-900 dark:to-indigo-950/30 w-full relative overflow-hidden">
+        <main className="flex-1 flex flex-col h-full min-h-0 bg-gradient-to-br from-slate-50 via-white to-indigo-50/30 dark:from-gray-900 dark:via-gray-900 dark:to-indigo-950/30 w-full relative overflow-hidden">
             {/* Animated Background */}
             <div className="absolute inset-0 opacity-20">
                 <div className="absolute inset-0 bg-gradient-to-br from-blue-100/30 via-purple-100/30 to-pink-100/30 dark:from-blue-900/10 dark:via-purple-900/10 dark:to-pink-900/10"/>
@@ -454,17 +444,28 @@ export const ChatWindowComponent = ({
                             </div>
                         )}
 
-                        {stompClientRef && stompClientRef.current && companion && (
-                            <AudioCall
-                                stompClient={stompClientRef.current}
-                                localUserId={user.id}
-                                remoteUserId={companion.id}
-                            />
+                        {companion && (
+                            <>
+                                <button
+                                    onClick={() => call.startCall(companion.id, chatDisplayName, "audio")}
+                                    disabled={call.busy}
+                                    title="Audio call"
+                                    aria-label="Start audio call"
+                                    className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-200 group disabled:opacity-40"
+                                >
+                                    <Phone size={20} className="text-gray-600 dark:text-gray-400 group-hover:text-green-600"/>
+                                </button>
+                                <button
+                                    onClick={() => call.startCall(companion.id, chatDisplayName, "video")}
+                                    disabled={call.busy}
+                                    title="Video call"
+                                    aria-label="Start video call"
+                                    className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-200 group disabled:opacity-40"
+                                >
+                                    <Video size={20} className="text-gray-600 dark:text-gray-400 group-hover:text-blue-600"/>
+                                </button>
+                            </>
                         )}
-
-                        <button className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-200 group">
-                            <Video size={20} className="text-gray-600 dark:text-gray-400 group-hover:text-blue-600 dark:group-hover:text-blue-400"/>
-                        </button>
 
                         <button className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-200 group">
                             <MoreVertical size={20} className="text-gray-600 dark:text-gray-400 group-hover:text-blue-600 dark:group-hover:text-blue-400"/>
@@ -477,7 +478,7 @@ export const ChatWindowComponent = ({
             <div
                 ref={messagesContainerRef}
                 onScroll={handleScroll}
-                className="flex-1 overflow-y-auto p-4 relative z-10 scroll-smooth"
+                className="flex-1 min-h-0 overflow-y-auto p-4 relative z-10 scroll-smooth"
                 style={{
                     scrollbarWidth: 'thin',
                     scrollbarColor: 'rgba(59, 130, 246, 0.3) transparent'
