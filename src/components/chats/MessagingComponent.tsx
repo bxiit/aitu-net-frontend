@@ -8,7 +8,7 @@ import {useIsMobile} from "@/hooks/useIsMobile";
 import {Loading} from "@/components/Loading";
 
 export default function MessagingComponent() {
-    const {chatRooms, chatRoomMessages, currentChatId, stompClientRef, newMessagesCount, selectChat, sendMessage, markMessageAsRead} = useChat()
+    const {chatRooms, chatRoomMessages, currentChatId, stompClientRef, newMessagesCount, selectChat, sendMessage} = useChat()
     const isMobile = useIsMobile()
 
     if (!stompClientRef.current)
@@ -53,7 +53,6 @@ export default function MessagingComponent() {
                             handleSendMessage={handleSendMessage}
                             selectChat={selectChat}
                             currentChatId={currentChatId}
-                            markMessageAsRead={markMessageAsRead}
                         />
                     </div>
                 )}

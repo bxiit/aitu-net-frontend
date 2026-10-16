@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChatMessage, DecryptedMessage, MessageType } from "@/models/chat/ChatMessage";
+import { ChatMessage, ChatMessageStatus, DecryptedMessage, MessageType } from "@/models/chat/ChatMessage";
 import { Client, Message } from "@stomp/stompjs";
 import { useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthProvider";
@@ -22,16 +22,16 @@ export function useChat() {
 
     const [participantKeys, setParticipantKeys] = useState<Map<string, Record<string, string>>>(new Map())
 
-    const timeoutRef = useRef<NodeJS.Timeout>(null)
-    const readMessagesRef = useRef<Map<string, DecryptedMessage>>(new Map())
     const [newMessagesCount, setNewMessagesCount] = useState<Map<string, number>>(new Map())
 
     // onConnected/onMessageReceived are registered once per WebSocket connection, so they would keep the
     // state from that render forever; they read current state through these refs instead.
     const chatRoomsRef = useRef(chatRooms)
     const participantKeysRef = useRef(participantKeys)
+    const currentChatIdRef = useRef(currentChatId)
     useEffect(() => { chatRoomsRef.current = chatRooms }, [chatRooms])
     useEffect(() => { participantKeysRef.current = participantKeys }, [participantKeys])
+    useEffect(() => { currentChatIdRef.current = currentChatId }, [currentChatId])
 
     const SOCKET_URL: string = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "defaultWebSocketUrl"
     const encryptionService = E2EEncryptionService.getInstance()
@@ -52,14 +52,13 @@ export function useChat() {
         stompClientRef.current = stompClient
 
         return () => {
-            markBufferedMessagesAsRead()
             stompClient.deactivate()
                 .catch(console.log)
         }
     }, [user])
 
     // Unread counts come from the server once per room; after that they're kept up to date locally
-    // (incremented in onMessageReceived, decremented in markMessageAsRead).
+    // (incremented in onMessageReceived, reset by markChatAsRead and MESSAGES_READ).
     const countedRoomsRef = useRef<Set<string>>(new Set())
     // One request per chat's keys, shared by concurrent callers (history load, selectChat, sendMessage)
     const keyRequestsRef = useRef<Map<string, Promise<Record<string, string>>>>(new Map())
@@ -130,11 +129,16 @@ export function useChat() {
                 // a new chat: its unread count (including this message) comes from the server
                 fetchAndSetChatRooms()
             } else if (encryptedMessage.senderId !== user?.id) {
-                setNewMessagesCount(prev => {
-                    const newState = new Map(prev)
-                    newState.set(encryptedMessage.chatId, (newState.get(encryptedMessage.chatId) ?? 0) + 1)
-                    return newState
-                })
+                if (isOpenAndVisible(encryptedMessage.chatId)) {
+                    // arrived in the chat being looked at: it's read right away
+                    markChatAsRead(encryptedMessage.chatId)
+                } else {
+                    setNewMessagesCount(prev => {
+                        const newState = new Map(prev)
+                        newState.set(encryptedMessage.chatId, (newState.get(encryptedMessage.chatId) ?? 0) + 1)
+                        return newState
+                    })
+                }
             }
 
             try {
@@ -151,6 +155,22 @@ export function useChat() {
 
             pushToChatRooms(chatRoom)
             await loadChatParticipantKeys(chatRoom.chatId)
+        } else if (messageObject.type === WSMessageType.MESSAGES_READ) {
+            const { chatId, readerId, messageIds } = messageObject.message
+            if (readerId === user?.id) {
+                // read in another tab or device
+                setUnreadCount(chatId, 0)
+            } else {
+                const read = new Set(messageIds)
+                setChatRoomMessages(prev => {
+                    const messages = prev.get(chatId)
+                    if (!messages) return prev
+                    const newMessages = new Map(prev)
+                    newMessages.set(chatId, messages.map(m =>
+                        read.has(m.id) ? { ...m, status: ChatMessageStatus.RECEIVED } : m))
+                    return newMessages
+                })
+            }
         }
     }
 
@@ -300,6 +320,8 @@ export function useChat() {
         }
 
         setCurrentChatId(chatId)
+        currentChatIdRef.current = chatId
+        markChatAsRead(chatId)
 
         if (!participantKeysRef.current.has(chatId)) {
             console.log('🔑 Loading participant keys...')
@@ -327,49 +349,40 @@ export function useChat() {
         })
     }
 
-    const markMessageAsRead = async (message: DecryptedMessage): Promise<void> => {
-        readMessagesRef.current.set(message.id, message)
-
-        if (timeoutRef.current) {
-            clearTimeout(timeoutRef.current)
-        }
-
-        timeoutRef.current = setTimeout(() => {
-            const messageIds = Array.from(readMessagesRef.current.keys())
-
-            stompClientRef.current?.publish({
-                destination: '/app/chat/message/status',
-                body: JSON.stringify({ messageIds })
-            })
-
-            readMessagesRef.current.clear()
-        }, 3000)
-
+    const setUnreadCount = (chatId: string, count: number) => {
         setNewMessagesCount(prev => {
+            if ((prev.get(chatId) ?? 0) === count) return prev
             const newState = new Map(prev)
-            const currentCount = newState.get(message.chatId)
-            if (currentCount && currentCount > 0) {
-                newState.set(message.chatId, currentCount - 1)
-            }
+            newState.set(chatId, count)
             return newState
         })
     }
 
-    const markBufferedMessagesAsRead = () => {
-        if (readMessagesRef.current.size > 0) {
-            if (timeoutRef.current) {
-                clearTimeout(timeoutRef.current)
-            }
+    const isOpenAndVisible = (chatId: string) =>
+        currentChatIdRef.current === chatId && document.visibilityState === 'visible'
 
-            const messageIds = Array.from(readMessagesRef.current.keys())
-            stompClientRef.current?.publish({
-                destination: '/app/chat/message/status',
-                body: JSON.stringify({ messageIds })
+    // A chat counts as read while it's open and the page is visible: on opening it, when a message arrives
+    // in it, and when the user comes back to the tab. The server marks all of it read for this user only.
+    const markChatAsRead = (chatId: string) => {
+        if (!chatId || document.visibilityState !== 'visible') return
+        setUnreadCount(chatId, 0)
+        if (stompClientRef.current?.connected) {
+            stompClientRef.current.publish({
+                destination: '/app/chat/read',
+                body: JSON.stringify({ chatId })
             })
-
-            readMessagesRef.current.clear()
         }
     }
+
+    useEffect(() => {
+        const onVisible = () => {
+            if (document.visibilityState === 'visible' && currentChatIdRef.current) {
+                markChatAsRead(currentChatIdRef.current)
+            }
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        return () => document.removeEventListener('visibilitychange', onVisible)
+    }, [])
 
     return {
         chatRooms,
@@ -379,7 +392,6 @@ export function useChat() {
 
         selectChat,
         sendMessage,
-        markMessageAsRead,
 
         stompClientRef
     }
