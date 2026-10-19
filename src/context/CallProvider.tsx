@@ -2,7 +2,8 @@
 
 import {createContext, ReactNode, useContext, useEffect, useReducer, useRef, useState} from "react";
 import {createPortal} from "react-dom";
-import {Client} from "@stomp/stompjs";
+import {useStomp} from "@/context/StompProvider";
+import {api} from "@/lib";
 import {Mic, MicOff, Phone, PhoneOff, Video as VideoIcon, VideoOff} from "lucide-react";
 
 export type CallMedia = "audio" | "video";
@@ -32,19 +33,12 @@ export function useCall(): CallContextValue {
     return context;
 }
 
-interface CallProviderProps {
-    stompClient: Client;
-    connectionEpoch: number;
-    /** Resolves a user id to a display name, for naming an incoming caller. */
-    resolveName: (userId: string) => string;
-    children: ReactNode;
-}
-
 /**
- * App-level WebRTC calling. One signaling subscription for the whole chat app, so a call rings whatever
- * chat is open. Media (audio/video), the ringing offer and the in-call overlay all live here.
+ * App-level WebRTC calling. One signaling subscription for the whole app (owned by StompProvider), so a call
+ * rings on any page. Media (audio/video), the ringing offer and the in-call overlay all live here.
  */
-export function CallProvider({stompClient, connectionEpoch, resolveName, children}: CallProviderProps) {
+export function CallProvider({children}: { children: ReactNode }) {
+    const {client, connected, connectionEpoch} = useStomp();
     const [phase, setPhase] = useState<Phase>("idle");
     const [media, setMedia] = useState<CallMedia>("audio");
     const [peerName, setPeerName] = useState("");
@@ -61,23 +55,34 @@ export function CallProvider({stompClient, connectionEpoch, resolveName, childre
     const peerIdRef = useRef<string | null>(null); // the other party of the current/pending call
     const phaseRef = useRef<Phase>("idle");
     phaseRef.current = phase;
-    // the signaling callback is registered once per connection, so read the latest name resolver through a ref
-    const resolveNameRef = useRef(resolveName);
-    resolveNameRef.current = resolveName;
+    // userId -> display name, for naming an incoming caller; filled from the user's chats on (re)connect
+    const namesRef = useRef<Map<string, string>>(new Map());
 
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
     const remoteAudioRef = useRef<HTMLAudioElement>(null);
 
     const publish = (to: string, payload: object) =>
-        stompClient.publish({destination: `/app/signaling/${to}`, body: JSON.stringify(payload)});
+        client?.publish({destination: `/app/signaling/${to}`, body: JSON.stringify(payload)});
 
     // one signaling subscription for the whole app, re-established on every (re)connect.
     // connectionEpoch bumps once the client is connected, so this re-runs then; guard against the
     // pre-connection render where subscribe() would throw "no underlying STOMP connection".
     useEffect(() => {
-        if (!stompClient.connected) return;
-        const subscription = stompClient.subscribe("/user/queue/signaling", message => {
+        if (!client || !connected) return;
+
+        // build a caller-name lookup from the user's chats (lightweight: rooms only, no messages)
+        api.chat.fetchChatRooms().then(response => {
+            const names = new Map<string, string>();
+            for (const room of response.data) {
+                for (const participant of room.participants) {
+                    names.set(participant.id, participant.username || participant.email || "Unknown");
+                }
+            }
+            namesRef.current = names;
+        }).catch(() => undefined);
+
+        const subscription = client.subscribe("/user/queue/signaling", message => {
             void onSignal(JSON.parse(message.body) as Signal);
         });
         return () => {
@@ -88,7 +93,7 @@ export function CallProvider({stompClient, connectionEpoch, resolveName, childre
             }
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [stompClient, connectionEpoch]);
+    }, [client, connected, connectionEpoch]);
 
     useEffect(() => cleanup, []);
 
@@ -109,7 +114,7 @@ export function CallProvider({stompClient, connectionEpoch, resolveName, childre
                     }
                     peerIdRef.current = signal.senderId;
                     incomingOfferRef.current = {sdp: signal.sdp, media: signal.media};
-                    setPeerName(resolveNameRef.current(signal.senderId));
+                    setPeerName(namesRef.current.get(signal.senderId) || "Unknown");
                     setMedia(signal.media);
                     setError(null);
                     setPhase("incoming"); // ring — do NOT auto-answer

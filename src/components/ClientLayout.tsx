@@ -9,12 +9,16 @@ import SearchBar from "@/components/SearchBar";
 import {Bell, Settings, User} from "lucide-react";
 import SidebarComponent from "@/components/SidebarComponent";
 import {defaultPfp} from "../../public/modules/defaultPfp";
+import {StompProvider} from "@/context/StompProvider";
+import {CallProvider} from "@/context/CallProvider";
 
 export default function ClientLayout({children}: { children: React.ReactNode }) {
     const {user} = useAuth();
     const [menuOpen, setMenuOpen] = useState(false);
 
     return (
+        <StompProvider>
+        <CallProvider>
         <div className="flex flex-col min-h-screen w-full bg-white dark:bg-gray-900">
             {/* Header */}
             <header
@@ -90,5 +94,7 @@ export default function ClientLayout({children}: { children: React.ReactNode }) 
                 <div className="w-full max-w-5xl">{children}</div>
             </main>
         </div>
+        </CallProvider>
+        </StompProvider>
     );
 }

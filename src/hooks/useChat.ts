@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatMessage, ChatMessageStatus, DecryptedMessage, MessageType } from "@/models/chat/ChatMessage";
-import { Client, Message, ReconnectionTimeMode } from "@stomp/stompjs";
+import { Message } from "@stomp/stompjs";
 import { useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthProvider";
 import { api } from "@/lib";
-import SockJS from "sockjs-client";
 import { ChatRoom } from "@/models/chat/ChatRoom";
 import { ChatRoomWithMessages } from "@/models/chat/ChatRoomWithMessages";
 import { WSMessage, WSMessageType } from "@/models/chat/WSMessage";
 import { getStrategy, StrategyDeps } from "@/strategies/chat/registry";
 import { E2EEncryptionService } from "@/service/E2EEncryptionService";
+import { useStomp } from "@/context/StompProvider";
 
 export function useChat() {
     const { user } = useAuth()
     const searchParams = useSearchParams()
-    const stompClientRef = useRef<Client | null>(null)
+    const { client, connected, connectionEpoch } = useStomp()
 
     const [chatRooms, setChatRooms] = useState<Map<string, ChatRoom>>(new Map())
     const [chatRoomMessages, setChatRoomMessages] = useState<Map<string, DecryptedMessage[]>>(new Map())
@@ -33,39 +33,29 @@ export function useChat() {
     useEffect(() => { participantKeysRef.current = participantKeys }, [participantKeys])
     useEffect(() => { currentChatIdRef.current = currentChatId }, [currentChatId])
 
-    const SOCKET_URL: string = process.env.NEXT_PUBLIC_WEBSOCKET_URL || "defaultWebSocketUrl"
     const encryptionService = E2EEncryptionService.getInstance()
 
     // true once the first connect has loaded everything; later connects are reconnects and refresh cheaply
     const hasInitializedRef = useRef(false)
-    // bumped on every (re)connect so component subscriptions (presence, signaling) re-subscribe on the new session
-    const [connectionEpoch, setConnectionEpoch] = useState(0)
 
+    // the connection is owned by StompProvider; react to it here. Runs on connect and on every reconnect
+    // (connectionEpoch bumps), re-subscribing on the new session.
     useEffect(() => {
-        if (!user) return
+        if (!client || !connected || !user) return
 
         encryptionService.initialize()
-
-        const stompClient = new Client({
-            webSocketFactory: () => new SockJS(SOCKET_URL),
-            // Exponential backoff from a per-client randomised base: after a server restart 10k clients don't all
-            // retry on the same 5s tick, which would hammer the server as it comes back up.
-            reconnectDelay: 2000 + Math.floor(Math.random() * 4000),
-            reconnectTimeMode: ReconnectionTimeMode.EXPONENTIAL,
-            maxReconnectDelay: 60_000,
-            connectionTimeout: 10_000,
-            onConnect: onConnected,
-            onStompError: (frame) => console.error(`STOMP Error: ${frame.body}`),
-        })
-
-        stompClient.activate()
-        stompClientRef.current = stompClient
+        const subscription = client.subscribe('/user/queue/messages', onMessageReceived)
+        void onConnected()
 
         return () => {
-            stompClient.deactivate()
-                .catch(console.log)
+            try {
+                subscription.unsubscribe()
+            } catch {
+                // the connection may already be gone on teardown
+            }
         }
-    }, [user])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [client, connected, connectionEpoch, user?.id])
 
     // Unread counts come from the server once per room; after that they're kept up to date locally
     // (incremented in onMessageReceived, reset by markChatAsRead and MESSAGES_READ).
@@ -101,10 +91,6 @@ export function useChat() {
     const onConnected = async () => {
         if (!user) return
         console.log("🔌 Connected to WebSocket")
-
-        // subscriptions are per session, so (re)subscribe on every connect and let components do the same via the epoch
-        stompClientRef.current?.subscribe('/user/queue/messages', onMessageReceived)
-        setConnectionEpoch(epoch => epoch + 1)
 
         if (!hasInitializedRef.current) {
             hasInitializedRef.current = true
@@ -254,7 +240,7 @@ export function useChat() {
                 type,
                 length: messageText.length
             }
-            stompClientRef.current?.publish({
+            client?.publish({
                 destination: '/app/chat',
                 body: JSON.stringify(chatMessage)
             })
@@ -417,8 +403,8 @@ export function useChat() {
     const markChatAsRead = (chatId: string) => {
         if (!chatId || document.visibilityState !== 'visible') return
         setUnreadCount(chatId, 0)
-        if (stompClientRef.current?.connected) {
-            stompClientRef.current.publish({
+        if (client?.connected) {
+            client.publish({
                 destination: '/app/chat/read',
                 body: JSON.stringify({ chatId })
             })
@@ -443,8 +429,6 @@ export function useChat() {
 
         selectChat,
         sendMessage,
-        connectionEpoch,
-
-        stompClientRef
+        connected,
     }
 }

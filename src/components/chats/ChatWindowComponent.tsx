@@ -1,14 +1,15 @@
 "use client";
 
-import React, { RefObject, useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { DecryptedMessage, MessageType, ChatMessageStatus } from "@/models/chat/ChatMessage";
 import { InputMessageBarComponent } from "@/components/chats/InputMessageBarComponent";
 import { ChatRoom, ChatRoomType } from "@/models/chat/ChatRoom";
 import { useAuth } from "@/context/AuthProvider";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Loading } from "@/components/Loading";
-import { Client, Message } from "@stomp/stompjs";
+import { Message } from "@stomp/stompjs";
 import {useCall} from "@/context/CallProvider";
+import {useStomp} from "@/context/StompProvider";
 import { EncryptedMediaPlayer } from "@/components/chats/messages/EncryptedMediaPlayer";
 import { ChatRoomDetails } from "@/components/chats/ChatRoomDetails";
 import { defaultPfp } from "../../../public/modules/defaultPfp";
@@ -34,9 +35,7 @@ import {
 interface ChatWindowComponentProps {
     chatMessages: DecryptedMessage[];
     chatRoom: ChatRoom;
-    stompClientRef: RefObject<Client | null>;
     currentChatId: string;
-    connectionEpoch: number;
     selectChat: (chatId: string) => Promise<void>;
     handleSendMessage: (messageText: string, messageType?: MessageType) => Promise<void>;
 }
@@ -197,8 +196,6 @@ type ConnectionStatus = "OFFLINE" | "ONLINE";
 export const ChatWindowComponent = ({
                                         chatRoom,
                                         chatMessages,
-                                        stompClientRef,
-                                        connectionEpoch,
                                         currentChatId,
                                         handleSendMessage,
                                         selectChat
@@ -207,6 +204,7 @@ export const ChatWindowComponent = ({
     const { user } = useAuth();
     const isMobile = useIsMobile();
     const call = useCall();
+    const { client, connectionEpoch } = useStomp();
     const [chatDetailsOpen, setChatDetailsOpen] = useState<boolean>(false);
     const [connStatus, setConnStatus] = useState<ConnectionStatus | undefined>(undefined);
     const [isScrolledUp, setIsScrolledUp] = useState(false);
@@ -247,7 +245,7 @@ export const ChatWindowComponent = ({
 
         setConnStatus(companion.connected ? "ONLINE" : "OFFLINE");
         // presence is a shared broadcast; keep only this companion's updates
-        const subscription = stompClientRef.current?.subscribe("/topic/presence", (message: Message) => {
+        const subscription = client?.subscribe("/topic/presence", (message: Message) => {
             const update: { userId: string; status: ConnectionStatus } = JSON.parse(message.body);
             if (update.userId === companion.id) {
                 setConnStatus(update.status);
@@ -255,7 +253,7 @@ export const ChatWindowComponent = ({
         });
 
         return () => subscription?.unsubscribe();
-    }, [currentChatId, chatRoom, user.id, stompClientRef, connectionEpoch]);
+    }, [currentChatId, chatRoom, user.id, client, connectionEpoch]);
 
     useEffect(() => {
         scrollToBottom();
