@@ -8,7 +8,7 @@ import {useIsMobile} from "@/hooks/useIsMobile";
 import {Loading} from "@/components/Loading";
 
 export default function MessagingComponent() {
-    const {chatRooms, chatRoomMessages, currentChatId, connected, newMessagesCount, selectChat, sendMessage} = useChat()
+    const {chatRooms, chatRoomMessages, currentChatId, connected, newMessagesCount, selectChat, sendMessage, loadMoreChats, hasMoreChats} = useChat()
     const isMobile = useIsMobile()
 
     if (!connected)
@@ -35,11 +35,11 @@ export default function MessagingComponent() {
             <div className="flex h-full flex-col md:flex-row">
                 {isMobile ? ((!currentChatId || !chatRooms.has(currentChatId)) && (
                     <div className="flex flex-1">
-                        <ChatRoomsComponent chatRooms={chatRooms} selectChat={selectChat} newMessagesCount={newMessagesCount}/>
+                        <ChatRoomsComponent chatRooms={chatRooms} selectChat={selectChat} newMessagesCount={newMessagesCount} selectedChatId={currentChatId} loadMoreChats={loadMoreChats} hasMoreChats={hasMoreChats}/>
                     </div>
                 )) : (
                     <div className="md:flex">
-                        <ChatRoomsComponent chatRooms={chatRooms} selectChat={selectChat} newMessagesCount={newMessagesCount}/>
+                        <ChatRoomsComponent chatRooms={chatRooms} selectChat={selectChat} newMessagesCount={newMessagesCount} selectedChatId={currentChatId} loadMoreChats={loadMoreChats} hasMoreChats={hasMoreChats}/>
                     </div>
                 )}
 

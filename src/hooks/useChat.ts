@@ -11,6 +11,9 @@ import { getStrategy, StrategyDeps } from "@/strategies/chat/registry";
 import { E2EEncryptionService } from "@/service/E2EEncryptionService";
 import { useStomp } from "@/context/StompProvider";
 
+// how many chat rooms (with their messages) to load per page. The first page is what renders urgently.
+const CHAT_PAGE_SIZE = 20
+
 export function useChat() {
     const { user } = useAuth()
     const searchParams = useSearchParams()
@@ -23,6 +26,12 @@ export function useChat() {
     const [participantKeys, setParticipantKeys] = useState<Map<string, Record<string, string>>>(new Map())
 
     const [newMessagesCount, setNewMessagesCount] = useState<Map<string, number>>(new Map())
+
+    // chat-list pagination: page 0 loads urgently, later pages append on demand
+    const [hasMoreChats, setHasMoreChats] = useState(false)
+    const chatPageRef = useRef(0)
+    const hasMoreChatsRef = useRef(false)
+    const loadingMoreRef = useRef(false)
 
     // onConnected/onMessageReceived are registered once per WebSocket connection, so they would keep the
     // state from that render forever; they read current state through these refs instead.
@@ -68,24 +77,22 @@ export function useChat() {
         if (uncounted.length === 0) return
         uncounted.forEach(chatId => countedRoomsRef.current.add(chatId))
 
-        const loadMessageCounts = async () => {
-            for (const chatId of uncounted) {
-                try {
-                    const response = await api.chat.countNewMessages(chatId)
-                    const count = response.data.count
-
-                    setNewMessagesCount(prev => {
-                        const newState = new Map(prev)
-                        newState.set(chatId, count)
-                        return newState
-                    })
-                } catch (error) {
-                    console.error(`Failed to load message count for chat ${chatId}:`, error)
-                }
-            }
-        }
-
-        loadMessageCounts()
+        // One request for every uncounted chat's badge instead of one count call per chat. The endpoint returns
+        // every room's unread count; rooms with none are absent, so default those to 0.
+        api.chat.fetchUnreadCounts()
+            .then(response => {
+                const counts = response.data
+                setNewMessagesCount(prev => {
+                    const newState = new Map(prev)
+                    uncounted.forEach(chatId => newState.set(chatId, counts[chatId] ?? 0))
+                    return newState
+                })
+            })
+            .catch(error => {
+                console.error('Failed to load unread counts:', error)
+                // let a later render retry the ones we couldn't load
+                uncounted.forEach(chatId => countedRoomsRef.current.delete(chatId))
+            })
     }, [chatRooms])
 
     const onConnected = async () => {
@@ -281,44 +288,101 @@ export function useChat() {
         }
     }
 
+    const decryptChatMessages = async (chat: ChatRoomWithMessages): Promise<DecryptedMessage[]> => {
+        const decrypted: DecryptedMessage[] = []
+        for (const encryptedMessage of chat.messages) {
+            try {
+                decrypted.push(await decryptReceivedMessage(encryptedMessage))
+            } catch (error) {
+                console.error('Failed to decrypt historical message:', error)
+            }
+        }
+        return decrypted
+    }
+
+    // Loads the first page of chat rooms with messages and renders it urgently: the room list is shown as soon as
+    // the page arrives, messages decrypt right after, and the "other things" (participant keys, unread counts)
+    // load asynchronously without blocking any of that.
     const fetchAndSetChats = async (userId?: string): Promise<Map<string, ChatRoom>> => {
         try {
-            console.log('Logging before fetch userId', userId)
-            const response = await api.chat.fetchChats(userId)
-            const chats: ChatRoomWithMessages[] = response.data
-            console.log('chats logging', chats)
-            console.log('💬 Loading', chats.length, 'chats with messages')
-
+            const chats: ChatRoomWithMessages[] = (await api.chat.fetchChatsPaged(0, CHAT_PAGE_SIZE, userId)).data
             const rooms = new Map(chats.map(chat => [chat.chatRoom.chatId, chat.chatRoom]))
-            const decryptedMessagesMap = new Map<string, DecryptedMessage[]>()
 
-            for (const chat of chats) {
-                const decryptedMessages: DecryptedMessage[] = []
-
-                if (!participantKeysRef.current.has(chat.chatRoom.chatId)) {
-                    await loadChatParticipantKeys(chat.chatRoom.chatId)
-                }
-
-                for (const encryptedMessage of chat.messages) {
-                    try {
-                        const decryptedMessage = await decryptReceivedMessage(encryptedMessage)
-                        decryptedMessages.push(decryptedMessage)
-                    } catch (error) {
-                        console.error('Failed to decrypt historical message:', error)
-                    }
-                }
-
-                decryptedMessagesMap.set(chat.chatRoom.chatId, decryptedMessages)
-            }
-
+            // render the room list right away, before decrypting anything
             setChatRooms(rooms)
+            chatPageRef.current = 1
+            hasMoreChatsRef.current = chats.length === CHAT_PAGE_SIZE
+            setHasMoreChats(hasMoreChatsRef.current)
+
+            // keys (for sending) load in the background in one request, concurrently with decryption below;
+            // unread counts load via the effect that reacts to chatRooms. Neither blocks the chat list.
+            void preloadAllParticipantKeys()
+
+            const decryptedMessagesMap = new Map<string, DecryptedMessage[]>()
+            for (const chat of chats) {
+                decryptedMessagesMap.set(chat.chatRoom.chatId, await decryptChatMessages(chat))
+            }
             setChatRoomMessages(decryptedMessagesMap)
 
-            console.log('✅ All messages decrypted and loaded')
             return rooms
         } catch (error) {
             console.error('Failed to fetch chats:', error)
             return new Map()
+        }
+    }
+
+    // Appends the next page of chats. Keys were already warmed for every room by the initial bulk preload, and the
+    // unread-count effect reacts to the growing room list, so loading more only needs the rooms and their messages.
+    const loadMoreChats = async () => {
+        if (loadingMoreRef.current || !hasMoreChatsRef.current || !user) return
+        loadingMoreRef.current = true
+        try {
+            const page = chatPageRef.current
+            const chats: ChatRoomWithMessages[] = (await api.chat.fetchChatsPaged(page, CHAT_PAGE_SIZE, user.id)).data
+            if (chats.length > 0) {
+                setChatRooms(prev => {
+                    const next = new Map(prev)
+                    for (const chat of chats) if (!next.has(chat.chatRoom.chatId)) next.set(chat.chatRoom.chatId, chat.chatRoom)
+                    return next
+                })
+                const decryptedByChat = new Map<string, DecryptedMessage[]>()
+                for (const chat of chats) decryptedByChat.set(chat.chatRoom.chatId, await decryptChatMessages(chat))
+                setChatRoomMessages(prev => {
+                    const next = new Map(prev)
+                    for (const [chatId, messages] of decryptedByChat) if (!next.has(chatId)) next.set(chatId, messages)
+                    return next
+                })
+                chatPageRef.current = page + 1
+            }
+            hasMoreChatsRef.current = chats.length === CHAT_PAGE_SIZE
+            setHasMoreChats(hasMoreChatsRef.current)
+        } catch (error) {
+            console.error('Failed to load more chats:', error)
+        } finally {
+            loadingMoreRef.current = false
+        }
+    }
+
+    // Warms every chat's participant keys in a single request instead of one /keys call per chat. Keys are only
+    // needed to *send* (decryption uses the reader's own private key), so this just primes the cache; a room
+    // whose participant has no key yet is omitted and loaded lazily (surfacing the 409) when first used.
+    const preloadAllParticipantKeys = async () => {
+        try {
+            const allKeys = (await api.chat.fetchAllChatKeys()).data
+            const entries = Object.entries(allKeys)
+            if (entries.length === 0) return
+            setParticipantKeys(prev => {
+                const next = new Map(prev)
+                for (const [chatId, keys] of entries) next.set(chatId, keys)
+                return next
+            })
+            // keep the ref and the in-flight-request cache in sync now, so callers this tick skip the per-chat fetch
+            for (const [chatId, keys] of entries) {
+                participantKeysRef.current.set(chatId, keys)
+                keyRequestsRef.current.set(chatId, Promise.resolve(keys))
+            }
+        } catch (error) {
+            console.error('Failed to bulk-load participant keys:', error)
         }
     }
 
@@ -430,5 +494,8 @@ export function useChat() {
         selectChat,
         sendMessage,
         connected,
+
+        loadMoreChats,
+        hasMoreChats,
     }
 }

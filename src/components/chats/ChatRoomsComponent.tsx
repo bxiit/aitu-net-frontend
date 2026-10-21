@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
-import { MessageCircle, Search, Users, Settings, Plus, Shield, Lock } from "lucide-react";
+import { MessageCircle, Search, Users, Plus, Shield, Lock } from "lucide-react";
 import Dropdown from "@/components/chats/DropDown";
 import { ChatRoom } from "@/models/chat/ChatRoom";
 import { useAuth } from "@/context/AuthProvider";
@@ -13,17 +13,32 @@ interface ChatRoomsComponentProps {
     chatRooms: Map<string, ChatRoom>;
     newMessagesCount: Map<string, number>;
     selectedChatId?: string;
+    loadMoreChats?: () => Promise<void>;
+    hasMoreChats?: boolean;
 }
 
 export const ChatRoomsComponent: React.FC<ChatRoomsComponentProps> = ({
                                                                           selectChat,
                                                                           chatRooms,
                                                                           newMessagesCount,
-                                                                          selectedChatId
+                                                                          selectedChatId,
+                                                                          loadMoreChats,
+                                                                          hasMoreChats
                                                                       }) => {
     const { user } = useAuth();
     const [searchQuery, setSearchQuery] = useState("");
     const [isSelectingChat, setIsSelectingChat] = useState<string | null>(null);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+    const handleLoadMore = async () => {
+        if (!loadMoreChats || isLoadingMore) return;
+        try {
+            setIsLoadingMore(true);
+            await loadMoreChats();
+        } finally {
+            setIsLoadingMore(false);
+        }
+    };
 
     const filteredChatRooms = useMemo(() => {
         if (!chatRooms || !searchQuery.trim()) {
@@ -243,6 +258,16 @@ export const ChatRoomsComponent: React.FC<ChatRoomsComponentProps> = ({
                     </div>
                 ) : (
                     <EmptyState searchQuery={searchQuery} />
+                )}
+
+                {hasMoreChats && !searchQuery.trim() && (
+                    <button
+                        onClick={handleLoadMore}
+                        disabled={isLoadingMore}
+                        className="w-full mt-2 py-2 text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg transition-colors duration-200 disabled:opacity-60 disabled:cursor-wait"
+                    >
+                        {isLoadingMore ? "Loading…" : "Load more"}
+                    </button>
                 )}
             </div>
         </aside>
