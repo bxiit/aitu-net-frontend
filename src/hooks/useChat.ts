@@ -13,6 +13,8 @@ import { useStomp } from "@/context/StompProvider";
 
 // how many chat rooms (with their messages) to load per page. The first page is what renders urgently.
 const CHAT_PAGE_SIZE = 20
+// messages loaded per chat initially and per older "scroll-up" page. Must match the backend MESSAGE_PAGE_SIZE.
+const MESSAGES_PAGE_SIZE = 30
 
 export function useChat() {
     const { user } = useAuth()
@@ -26,6 +28,10 @@ export function useChat() {
     const [participantKeys, setParticipantKeys] = useState<Map<string, Record<string, string>>>(new Map())
 
     const [newMessagesCount, setNewMessagesCount] = useState<Map<string, number>>(new Map())
+
+    // per-chat message pagination: whether older messages remain to load on scroll-up
+    const [hasMoreMessages, setHasMoreMessages] = useState<Map<string, boolean>>(new Map())
+    const loadingOlderRef = useRef<Set<string>>(new Set())
 
     // chat-list pagination: page 0 loads urgently, later pages append on demand
     const [hasMoreChats, setHasMoreChats] = useState(false)
@@ -143,7 +149,8 @@ export function useChat() {
             if (!participantKeysRef.current.has(chatId)) {
                 await loadChatParticipantKeys(chatId)
             }
-            const encrypted = (await api.chat.fetchChatMessages(chatId)).data
+            // reload just the latest page; older messages stay behind scroll-up pagination
+            const encrypted = (await api.chat.fetchChatMessages(chatId, { size: MESSAGES_PAGE_SIZE })).data
             const decrypted: DecryptedMessage[] = []
             for (const message of encrypted) {
                 try {
@@ -157,8 +164,52 @@ export function useChat() {
                 newMessages.set(chatId, decrypted)
                 return newMessages
             })
+            setHasMoreMessages(prev => {
+                const next = new Map(prev)
+                next.set(chatId, encrypted.length === MESSAGES_PAGE_SIZE)
+                return next
+            })
         } catch (error) {
             console.error('Failed to reload chat messages:', error)
+        }
+    }
+
+    // Loads the previous (older) page of a chat's messages for scroll-up pagination, keyed off the oldest message
+    // the client already has. Prepends them (deduping by id) so the newest stay at the bottom.
+    const loadOlderMessages = async (chatId: string, before?: Date | string): Promise<number> => {
+        if (!before || loadingOlderRef.current.has(chatId)) return 0
+        loadingOlderRef.current.add(chatId)
+        try {
+            const encrypted = (await api.chat.fetchChatMessages(chatId, { before: String(before), size: MESSAGES_PAGE_SIZE })).data
+            const older: DecryptedMessage[] = []
+            for (const message of encrypted) {
+                try {
+                    older.push(await decryptReceivedMessage(message))
+                } catch (error) {
+                    console.error('Failed to decrypt older message:', error)
+                }
+            }
+            if (older.length > 0) {
+                setChatRoomMessages(prev => {
+                    const next = new Map(prev)
+                    const existing = next.get(chatId) ?? []
+                    const existingIds = new Set(existing.map(m => m.id))
+                    const merged = [...older.filter(m => !existingIds.has(m.id)), ...existing]
+                    next.set(chatId, merged)
+                    return next
+                })
+            }
+            setHasMoreMessages(prev => {
+                const next = new Map(prev)
+                next.set(chatId, encrypted.length === MESSAGES_PAGE_SIZE)
+                return next
+            })
+            return older.length
+        } catch (error) {
+            console.error('Failed to load older messages:', error)
+            return 0
+        } finally {
+            loadingOlderRef.current.delete(chatId)
         }
     }
 
@@ -323,6 +374,8 @@ export function useChat() {
                 decryptedMessagesMap.set(chat.chatRoom.chatId, await decryptChatMessages(chat))
             }
             setChatRoomMessages(decryptedMessagesMap)
+            // a full page back implies there may be older messages to load on scroll-up
+            setHasMoreMessages(new Map(chats.map(chat => [chat.chatRoom.chatId, chat.messages.length === MESSAGES_PAGE_SIZE])))
 
             return rooms
         } catch (error) {
@@ -350,6 +403,11 @@ export function useChat() {
                 setChatRoomMessages(prev => {
                     const next = new Map(prev)
                     for (const [chatId, messages] of decryptedByChat) if (!next.has(chatId)) next.set(chatId, messages)
+                    return next
+                })
+                setHasMoreMessages(prev => {
+                    const next = new Map(prev)
+                    for (const chat of chats) if (!next.has(chat.chatRoom.chatId)) next.set(chat.chatRoom.chatId, chat.messages.length === MESSAGES_PAGE_SIZE)
                     return next
                 })
                 chatPageRef.current = page + 1
@@ -497,5 +555,8 @@ export function useChat() {
 
         loadMoreChats,
         hasMoreChats,
+
+        loadOlderMessages,
+        hasMoreMessages,
     }
 }

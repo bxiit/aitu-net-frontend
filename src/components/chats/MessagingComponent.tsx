@@ -8,7 +8,7 @@ import {useIsMobile} from "@/hooks/useIsMobile";
 import {Loading} from "@/components/Loading";
 
 export default function MessagingComponent() {
-    const {chatRooms, chatRoomMessages, currentChatId, connected, newMessagesCount, selectChat, sendMessage, loadMoreChats, hasMoreChats} = useChat()
+    const {chatRooms, chatRoomMessages, currentChatId, connected, newMessagesCount, selectChat, sendMessage, loadMoreChats, hasMoreChats, loadOlderMessages, hasMoreMessages} = useChat()
     const isMobile = useIsMobile()
 
     if (!connected)
@@ -52,6 +52,8 @@ export default function MessagingComponent() {
                             handleSendMessage={handleSendMessage}
                             selectChat={selectChat}
                             currentChatId={currentChatId}
+                            loadOlderMessages={loadOlderMessages}
+                            hasOlderMessages={hasMoreMessages.get(currentChatId) ?? false}
                         />
                     </div>
                 )}

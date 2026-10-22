@@ -41,9 +41,12 @@ export const chatApi = {
     fetchChatsPaged: (page: number, size: number, userId?: string): Promise<AxiosResponse<ChatRoomWithMessages[]>> =>
         (request<ChatRoomWithMessages[]>(`/chats/${userId ?? ''}`, {baseURL: V2_BASE, params: {page, size}})),
 
-    /** Messages of a single chat (encrypted); used to reload just the open chat after a reconnect. */
-    fetchChatMessages: (chatId: string): Promise<AxiosResponse<ChatMessage[]>> =>
-        (request<ChatMessage[]>(`/chats/rooms/${chatId}/messages`)),
+    /**
+     * One page of a chat's messages (encrypted), oldest-to-newest. No opts → the latest page; pass `before` (the
+     * oldest message you already have) to load the previous, older page on scroll-up.
+     */
+    fetchChatMessages: (chatId: string, opts?: { before?: string; size?: number }): Promise<AxiosResponse<ChatMessage[]>> =>
+        (request<ChatMessage[]>(`/chats/rooms/${chatId}/messages`, {params: opts})),
 
     countNewMessages: (chatId: string): Promise<AxiosResponse<{ count: number }>> =>
         (request<{ count: number }>(`/chats/rooms/${chatId}/messages/count`)),

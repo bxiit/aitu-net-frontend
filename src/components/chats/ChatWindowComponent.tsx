@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DecryptedMessage, MessageType, ChatMessageStatus } from "@/models/chat/ChatMessage";
 import { InputMessageBarComponent } from "@/components/chats/InputMessageBarComponent";
 import { ChatRoom, ChatRoomType } from "@/models/chat/ChatRoom";
@@ -38,6 +38,8 @@ interface ChatWindowComponentProps {
     currentChatId: string;
     selectChat: (chatId: string) => Promise<void>;
     handleSendMessage: (messageText: string, messageType?: MessageType) => Promise<void>;
+    loadOlderMessages?: (chatId: string, before?: Date | string) => Promise<number>;
+    hasOlderMessages?: boolean;
 }
 
 
@@ -198,7 +200,9 @@ export const ChatWindowComponent = ({
                                         chatMessages,
                                         currentChatId,
                                         handleSendMessage,
-                                        selectChat
+                                        selectChat,
+                                        loadOlderMessages,
+                                        hasOlderMessages
                                     }: ChatWindowComponentProps) => {
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const { user } = useAuth();
@@ -209,7 +213,10 @@ export const ChatWindowComponent = ({
     const [connStatus, setConnStatus] = useState<ConnectionStatus | undefined>(undefined);
     const [isScrolledUp, setIsScrolledUp] = useState(false);
     const [isEncrypting, setIsEncrypting] = useState(false);
+    const [isLoadingOlder, setIsLoadingOlder] = useState(false);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
+    // when set, the next render is a prepend of older messages: restore scroll position instead of jumping to bottom
+    const prependRestoreRef = useRef<number | null>(null);
 
     // E2E Message Renderer
     const messageRenderer = E2EMessageRenderer(user?.id || '');
@@ -255,9 +262,30 @@ export const ChatWindowComponent = ({
         return () => subscription?.unsubscribe();
     }, [currentChatId, chatRoom, user.id, client, connectionEpoch]);
 
-    useEffect(() => {
+    // After a prepend of older messages, keep the viewport anchored where the user was (restore the scroll offset
+    // by the height the prepended batch added) instead of jumping to the bottom. Otherwise, scroll to the newest.
+    useLayoutEffect(() => {
+        const container = messagesContainerRef.current;
+        if (prependRestoreRef.current !== null && container) {
+            container.scrollTop += container.scrollHeight - prependRestoreRef.current;
+            prependRestoreRef.current = null;
+            return;
+        }
         scrollToBottom();
     }, [chatMessages]);
+
+    const handleLoadOlder = async () => {
+        if (!loadOlderMessages || isLoadingOlder) return;
+        const container = messagesContainerRef.current;
+        prependRestoreRef.current = container ? container.scrollHeight : 0;
+        setIsLoadingOlder(true);
+        try {
+            const added = await loadOlderMessages(currentChatId, chatMessages[0]?.createdAt);
+            if (added === 0) prependRestoreRef.current = null; // nothing prepended; let normal behaviour resume
+        } finally {
+            setIsLoadingOlder(false);
+        }
+    };
 
     // Render message using E2E renderer
     function displayChatMessage(message: DecryptedMessage) {
@@ -484,6 +512,17 @@ export const ChatWindowComponent = ({
             >
                 {chatMessages && chatMessages.length > 0 ? (
                     <>
+                        {hasOlderMessages && (
+                            <div className="flex justify-center mb-3">
+                                <button
+                                    onClick={handleLoadOlder}
+                                    disabled={isLoadingOlder}
+                                    className="px-4 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-white/70 dark:bg-gray-800/70 hover:bg-white dark:hover:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full shadow-sm transition-colors duration-200 disabled:opacity-60 disabled:cursor-wait"
+                                >
+                                    {isLoadingOlder ? "Loading…" : "Load older messages"}
+                                </button>
+                            </div>
+                        )}
                         {chatMessages.map((message, index) => (
                             <div
                                 key={message.id}
